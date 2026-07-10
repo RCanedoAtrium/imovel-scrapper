@@ -1,0 +1,42 @@
+# Environments
+.env
+.env.local
+.env.*.local
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv
+venv/
+ENV/
+venv.bak/
+.pytest_cache/
+.mypy_cache/
+
+# Local database / data storage
+storage/
+data/
+*.xlsx
+*.csv
+
+# OS metadata
+.DS_Store
+Thumbs.db
