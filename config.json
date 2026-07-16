@@ -10,6 +10,25 @@
     "ANCHIETA",
     "BOA VIAGEM",
     "SANTA LÚCIA",
-    "CARMO"
-  ]
+    "CARMO",
+    "SION",
+    "SERRA"
+  ],
+  "sites": ["vivareal", "zap", "olx", "quintoandar", "imovelweb"],
+  "pages_per_neighborhood": 4,
+  "min_pages_per_neighborhood": 2,
+  "min_new_listings_per_page": 3,
+  "discount_threshold": 0.20,
+  "classifier": "ml",
+  "min_transactions": 5,
+  "listing_freshness_days": 30,
+  "max_price": 800000,
+  "min_area_m2": 40,
+  "iptu_staleness_days": 75,
+  "itbi_history_start": "2024-06",
+  "pbh": {
+    "api_base_url": "https://dados.pbh.gov.br/api/3/action",
+    "iptu_dataset": "cadastro-imobiliario-regional-centro-sul",
+    "itbi_dataset": "itbi-relatorios"
+  }
 }
