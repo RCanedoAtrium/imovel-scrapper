@@ -56,6 +56,12 @@ def test_pipeline_without_network(project):
         root / "data" / "processed" / "analysis.csv", sep=";", decimal=",", encoding="utf-8-sig"
     )
     record = analysis.iloc[0]
+    assert record["media_m2_itbi_bairro_geral"] == 5110
+    assert record["media_m2_itbi_bairro_padrao"] == 5050
+    assert record["media_m2_anuncios_bairro_geral"] == record["price_m2"]
+    assert record["media_m2_anuncios_bairro_padrao"] == record["price_m2"]
+    assert record["media_m2_bairro_geral"] == 5110
+    assert record["media_m2_bairro_padrao"] == 5050
     assert record["itbi_m2_neighborhood_mean"] == 5110
     assert record["itbi_m2_neighborhood_pattern_mean"] == 5050
     assert record["discount_vs_neighborhood_pattern_mean"] < record["discount_vs_neighborhood_mean"]

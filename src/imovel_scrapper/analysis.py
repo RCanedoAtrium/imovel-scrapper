@@ -258,6 +258,10 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             "classification_method": method,
             "classification_confidence": confidence,
             "classifier_version": classifier.version,
+            "media_m2_itbi_bairro_padrao": pattern_mean_m2,
+            "media_m2_itbi_bairro_geral": mean_m2,
+            "media_m2_bairro_padrao": pattern_mean_m2,
+            "media_m2_bairro_geral": mean_m2,
             "itbi_m2_neighborhood_mean": mean_m2,
             "itbi_m2_neighborhood_pattern_mean": pattern_mean_m2,
             "itbi_neighborhood_pattern_sales_count": pattern_sales_count,
@@ -274,6 +278,10 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         })
         output.append(record)
     analysis = pd.DataFrame(output)
+    analysis["media_m2_anuncios_bairro_padrao"] = analysis.groupby(
+        ["neighborhood", "finish_pattern"]
+    )["price_m2"].transform("mean")
+    analysis["media_m2_anuncios_bairro_geral"] = analysis.groupby("neighborhood")["price_m2"].transform("mean")
     analysis.sort_values(
         by=["opportunity_status", "discount_vs_mean"], ascending=[True, False], inplace=True
     )
@@ -286,6 +294,10 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             "model": classifier.metadata,
             "discount_threshold": threshold,
             "sources": [path.name for path in required],
+            "m2_metrics": {
+                "itbi": ["media_m2_itbi_bairro_padrao", "media_m2_itbi_bairro_geral"],
+                "anuncios": ["media_m2_anuncios_bairro_padrao", "media_m2_anuncios_bairro_geral"],
+            },
         },
     )
     return StageResult(
