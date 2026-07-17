@@ -56,14 +56,25 @@ def test_pipeline_without_network(project):
         root / "data" / "processed" / "analysis.csv", sep=";", decimal=",", encoding="utf-8-sig"
     )
     record = analysis.iloc[0]
-    assert record["media_m2_itbi_bairro_geral"] == 5110
-    assert record["media_m2_itbi_bairro_padrao"] == 5050
-    assert record["media_m2_anuncios_bairro_geral"] == record["price_m2"]
-    assert record["media_m2_anuncios_bairro_padrao"] == record["price_m2"]
-    assert record["media_m2_bairro_geral"] == 5110
-    assert record["media_m2_bairro_padrao"] == 5050
     assert record["itbi_m2_neighborhood_mean"] == 5110
     assert record["itbi_m2_neighborhood_pattern_mean"] == 5050
+    assert record["listing_m2_neighborhood_mean"] == record["price_m2"]
+    assert record["listing_m2_neighborhood_pattern_mean"] == record["price_m2"]
+    assert record["itbi_m2_neighborhood_median"] == 5110
+    assert record["itbi_neighborhood_sales_count"] == 12
+    assert record["itbi_m2_neighborhood_pattern_median"] == 5050
+    assert list(analysis.columns[:38]) == [
+        "source", "source_file", "collected_at", "listing_age_days", "requested_neighborhood",
+        "cep", "cep_original", "cep_inference_method", "evidence_level", "match_reason",
+        "classification_method", "classification_confidence", "classifier_version",
+        "opportunity_criteria", "opportunity_status", "neighborhood_method", "title", "url",
+        "neighborhood", "price", "area_m2", "price_m2", "bedrooms", "bathrooms",
+        "parking_spaces", "condominium", "advertised_iptu", "street", "number",
+        "finish_pattern", "building_year", "itbi_m2_neighborhood_mean",
+        "itbi_m2_neighborhood_pattern_mean", "listing_m2_neighborhood_mean",
+        "listing_m2_neighborhood_pattern_mean", "itbi_m2_neighborhood_median",
+        "itbi_neighborhood_sales_count", "itbi_m2_neighborhood_pattern_median",
+    ]
     assert record["discount_vs_neighborhood_pattern_mean"] < record["discount_vs_neighborhood_mean"]
     assert (root / "data" / "processed" / "analysis.csv").exists()
     report = generate_report(settings, run_id="test")

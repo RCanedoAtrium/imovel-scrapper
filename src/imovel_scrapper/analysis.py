@@ -188,7 +188,7 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
     pattern_stats = (
         transactions[transactions["finish_pattern"].isin(VALID_PATTERNS)]
         .groupby(["neighborhood", "finish_pattern"])["price_m2"]
-        .agg(["mean", "count"])
+        .agg(["mean", "median", "count"])
         .to_dict("index")
     )
     output: list[dict[str, object]] = []
@@ -225,6 +225,7 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         sales_count = int(reference.get("itbi_sales_count", 0) or 0)
         pattern_reference = pattern_stats.get((neighborhood, pattern), {})
         pattern_mean_m2 = float(pattern_reference.get("mean", 0) or 0)
+        pattern_median_m2 = float(pattern_reference.get("median", 0) or 0)
         pattern_sales_count = int(pattern_reference.get("count", 0) or 0)
         discount_mean = (mean_m2 - float(listing["price_m2"])) / mean_m2 if mean_m2 else 0.0
         discount_pattern_mean = (
@@ -258,17 +259,11 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             "classification_method": method,
             "classification_confidence": confidence,
             "classifier_version": classifier.version,
-            "media_m2_itbi_bairro_padrao": pattern_mean_m2,
-            "media_m2_itbi_bairro_geral": mean_m2,
-            "media_m2_bairro_padrao": pattern_mean_m2,
-            "media_m2_bairro_geral": mean_m2,
             "itbi_m2_neighborhood_mean": mean_m2,
             "itbi_m2_neighborhood_pattern_mean": pattern_mean_m2,
-            "itbi_neighborhood_pattern_sales_count": pattern_sales_count,
-            "itbi_m2_mean": mean_m2,
-            "itbi_m2_median": median_m2,
-            "itbi_sales_count": sales_count,
-            "p3_m2_median": p3_median,
+            "itbi_m2_neighborhood_median": median_m2,
+            "itbi_neighborhood_sales_count": sales_count,
+            "itbi_m2_neighborhood_pattern_median": pattern_median_m2,
             "discount_vs_neighborhood_mean": discount_mean,
             "discount_vs_neighborhood_pattern_mean": discount_pattern_mean,
             "discount_vs_mean": discount_mean,
@@ -278,10 +273,30 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         })
         output.append(record)
     analysis = pd.DataFrame(output)
-    analysis["media_m2_anuncios_bairro_padrao"] = analysis.groupby(
+    analysis["listing_m2_neighborhood_pattern_mean"] = analysis.groupby(
         ["neighborhood", "finish_pattern"]
     )["price_m2"].transform("mean")
-    analysis["media_m2_anuncios_bairro_geral"] = analysis.groupby("neighborhood")["price_m2"].transform("mean")
+    analysis["listing_m2_neighborhood_mean"] = analysis.groupby("neighborhood")["price_m2"].transform("mean")
+    metric_columns = [
+        "itbi_m2_neighborhood_mean",
+        "itbi_m2_neighborhood_pattern_mean",
+        "listing_m2_neighborhood_mean",
+        "listing_m2_neighborhood_pattern_mean",
+        "itbi_m2_neighborhood_median",
+        "itbi_neighborhood_sales_count",
+        "itbi_m2_neighborhood_pattern_median",
+    ]
+    leading_columns = [
+        "source", "source_file", "collected_at", "listing_age_days", "requested_neighborhood",
+        "cep", "cep_original", "cep_inference_method", "evidence_level", "match_reason",
+        "classification_method", "classification_confidence", "classifier_version",
+        "opportunity_criteria", "opportunity_status", "neighborhood_method", "title", "url",
+        "neighborhood", "price", "area_m2", "price_m2", "bedrooms", "bathrooms",
+        "parking_spaces", "condominium", "advertised_iptu", "street", "number",
+        "finish_pattern", "building_year",
+    ]
+    remaining_columns = [column for column in analysis.columns if column not in leading_columns + metric_columns]
+    analysis = analysis[leading_columns + metric_columns + remaining_columns]
     analysis.sort_values(
         by=["opportunity_status", "discount_vs_mean"], ascending=[True, False], inplace=True
     )
@@ -295,8 +310,11 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             "discount_threshold": threshold,
             "sources": [path.name for path in required],
             "m2_metrics": {
-                "itbi": ["media_m2_itbi_bairro_padrao", "media_m2_itbi_bairro_geral"],
-                "anuncios": ["media_m2_anuncios_bairro_padrao", "media_m2_anuncios_bairro_geral"],
+                "itbi": [
+                    "itbi_m2_neighborhood_mean", "itbi_m2_neighborhood_pattern_mean",
+                    "itbi_m2_neighborhood_median", "itbi_m2_neighborhood_pattern_median",
+                ],
+                "listings": ["listing_m2_neighborhood_mean", "listing_m2_neighborhood_pattern_mean"],
             },
         },
     )

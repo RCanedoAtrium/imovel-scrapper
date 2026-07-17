@@ -98,11 +98,10 @@ def _round_for_report(frame: pd.DataFrame) -> pd.DataFrame:
     money_columns = {
         "price", "condominium", "advertised_iptu", "transaction_price",
         "itbi_m2_mean", "itbi_m2_median", "itbi_m2_p30", "itbi_m2_p80",
-        "media_m2_bairro_padrao", "media_m2_bairro_geral",
-        "media_m2_itbi_bairro_padrao", "media_m2_itbi_bairro_geral",
-        "media_m2_anuncios_bairro_padrao", "media_m2_anuncios_bairro_geral",
         "itbi_m2_neighborhood_mean", "itbi_m2_neighborhood_pattern_mean",
-        "p3_m2_median", "itbi_total_volume", "price_m2",
+        "itbi_m2_neighborhood_median", "itbi_m2_neighborhood_pattern_median",
+        "listing_m2_neighborhood_mean", "listing_m2_neighborhood_pattern_mean",
+        "itbi_total_volume", "price_m2",
     }
     area_columns = {"area_m2", "median_area", "area_min", "area_max"}
     ratio_columns = {
@@ -142,11 +141,10 @@ def _format_sheet(writer: pd.ExcelWriter, name: str, frame: pd.DataFrame) -> Non
         fmt = None
         if column in {
             "price", "condominium", "advertised_iptu", "itbi_m2_mean", "itbi_m2_median",
-            "media_m2_bairro_padrao", "media_m2_bairro_geral",
-            "media_m2_itbi_bairro_padrao", "media_m2_itbi_bairro_geral",
-            "media_m2_anuncios_bairro_padrao", "media_m2_anuncios_bairro_geral",
             "itbi_m2_neighborhood_mean", "itbi_m2_neighborhood_pattern_mean",
-            "itbi_m2_p30", "itbi_m2_p80", "p3_m2_median", "itbi_total_volume",
+            "itbi_m2_neighborhood_median", "itbi_m2_neighborhood_pattern_median",
+            "listing_m2_neighborhood_mean", "listing_m2_neighborhood_pattern_mean",
+            "itbi_m2_p30", "itbi_m2_p80", "itbi_total_volume",
         }:
             fmt = currency
         elif column == "price_m2":
