@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from imovel_scrapper.storage import read_csv_auto, write_csv
+from property_scraper.storage import read_csv_auto, write_csv
 
 
 def test_write_csv_uses_excel_compatible_utf8_semicolon_and_decimal_comma(tmp_path):

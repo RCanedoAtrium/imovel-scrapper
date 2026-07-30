@@ -1,6 +1,6 @@
 import pandas as pd
 
-from imovel_scrapper.analysis import build_cep_lookup, infer_listing_cep, match_building
+from property_scraper.analysis import build_cep_lookup, infer_listing_cep, match_building
 
 
 def test_matching_evidence_levels():
@@ -12,8 +12,8 @@ def test_matching_evidence_levels():
         "cep": "30360250", "number": "130", "street": "PTOLOMEU", "neighborhood": "ANCHIETA", "area_m2": 60,
     })
     _, evidence, reason = match_building(listing, buildings)
-    assert evidence == "confirmado"
-    assert reason == "cep+numero_unico"
+    assert evidence == "confirmed"
+    assert reason == "cep+unique_number"
 
 
 def test_matching_without_address_is_unmatched():
@@ -21,7 +21,7 @@ def test_matching_without_address_is_unmatched():
     listing = pd.Series({"cep": "", "number": "", "street": "", "neighborhood": "ANCHIETA", "area_m2": 60})
     matched, evidence, _ = match_building(listing, buildings)
     assert matched is None
-    assert evidence == "sem_match"
+    assert evidence == "no_match"
 
 
 def test_cep_is_inferred_from_normalized_street_and_number():
@@ -35,4 +35,4 @@ def test_cep_is_inferred_from_normalized_street_and_number():
         pd.Series({"street": "Rua Assuncao", "number": "42", "neighborhood": "Savassi", "cep": ""}),
         build_cep_lookup(transactions, buildings),
     )
-    assert (cep, method) == ("30112000", "logradouro_numero")
+    assert (cep, method) == ("30112000", "street_number")

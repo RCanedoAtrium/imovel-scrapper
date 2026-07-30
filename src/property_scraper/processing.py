@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -23,7 +22,8 @@ from .normalization import (
     normalize_street,
     parse_listing_address,
 )
-from .sources.pbh import ITBI_REQUIRED, IPTU_REQUIRED, PBHSynchronizer, validate_csv_schema
+from .parking import classify_parking
+from .sources.pbh import ITBI_REQUIRED, IPTU_REQUIRED, validate_csv_schema
 from .storage import read_csv_auto, write_dataset
 
 
@@ -37,7 +37,7 @@ def _read_csv(path: Path, sep: str | None = None) -> pd.DataFrame:
             return pd.read_csv(path, sep=sep, encoding=encoding, dtype=str, low_memory=False)
         except (UnicodeDecodeError, pd.errors.ParserError) as exc:
             failures.append(f"{encoding}: {exc}")
-    raise DataQualityError(f"Nao foi possivel ler {path}: {' | '.join(failures)}")
+    raise DataQualityError(f"Could not read {path}: {' | '.join(failures)}")
 
 
 def _parse_itbi_address(value: object) -> tuple[str, str, str]:
@@ -68,10 +68,9 @@ def _competence_from_name(path: Path) -> str:
 
 
 def prepare_itbi(settings: Settings) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], dict[tuple[str, str], int]]:
-    PBHSynchronizer(settings).migrate_legacy()
     files = sorted(settings.paths.itbi.glob("*.csv"))
     if not files:
-        raise DataQualityError(f"Nenhum CSV de ITBI encontrado em {settings.paths.itbi}")
+        raise DataQualityError(f"No ITBI CSV files found in {settings.paths.itbi}")
     frames: list[pd.DataFrame] = []
     for path in files:
         validate_csv_schema(path, ITBI_REQUIRED)
@@ -131,7 +130,7 @@ def prepare_itbi(settings: Settings) -> tuple[pd.DataFrame, pd.DataFrame, dict[s
 def _latest_iptu_file(settings: Settings) -> Path:
     files = list(settings.paths.iptu.glob("*.csv"))
     if not files:
-        raise DataQualityError(f"Nenhum CSV de IPTU encontrado em {settings.paths.iptu}")
+        raise DataQualityError(f"No IPTU CSV files found in {settings.paths.iptu}")
     dated = [(_competence_from_name(path), path) for path in files]
     return max(dated, key=lambda item: (item[0], item[1].name))[1]
 
@@ -175,27 +174,14 @@ def _canonical_url(value: object) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), "", ""))
 
 
-def _migrate_legacy_listing(settings: Settings) -> list[Path]:
-    legacy = settings.paths.root / "data" / "raw" / "anuncios_vivareal.csv"
-    if any(settings.paths.listings.rglob("*.csv")) or not legacy.exists():
-        return []
-    target_dir = settings.paths.listings / "legacy"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / legacy.name
-    shutil.copy2(legacy, target)
-    return [target]
-
-
 def prepare_listings(settings: Settings, known_neighborhoods: list[str] | None = None) -> pd.DataFrame:
-    _migrate_legacy_listing(settings)
     latest_pointer = settings.paths.listings / "latest.txt"
-    if latest_pointer.exists():
-        latest_run = latest_pointer.read_text(encoding="utf-8").strip()
-        files = sorted((settings.paths.listings / latest_run).glob("*.csv"))
-    else:
-        files = sorted((settings.paths.listings / "legacy").glob("*.csv"))
+    if not latest_pointer.exists():
+        raise DataQualityError(f"Listing pointer is missing: {latest_pointer}")
+    latest_run = latest_pointer.read_text(encoding="utf-8").strip()
+    files = sorted((settings.paths.listings / latest_run).glob("*.csv"))
     if not files:
-        raise DataQualityError(f"Nenhum CSV de anuncios encontrado em {settings.paths.listings}")
+        raise DataQualityError(f"No listing CSV files found in {settings.paths.listings}")
     records: list[dict[str, object]] = []
     for path in files:
         frame = read_csv_auto(path, dtype=str, low_memory=False)
@@ -261,6 +247,7 @@ def prepare_listings(settings: Settings, known_neighborhoods: list[str] | None =
             if detected_neighborhood and detected_neighborhood not in target_neighborhoods:
                 continue
             final_neighborhood = detected_neighborhood or requested_neighborhood
+            parking = classify_parking(title)
             records.append({
                 "source": str(extract_nested(source, ["site", "source"]) or path.stem),
                 "source_file": str(path.relative_to(settings.paths.root)),
@@ -280,6 +267,7 @@ def prepare_listings(settings: Settings, known_neighborhoods: list[str] | None =
                     or detail(r"(\d+)\s*(?:banheiro|banho)"),
                 "parking_spaces": clean_numeric(extract_nested(source, ["parking_spaces", "parking", "listing.parking_spaces"]))
                     or detail(r"(\d+)\s*(?:vaga|garagem)"),
+                **parking,
                 "condominium": clean_numeric(extract_nested(source, ["condominium", "listing.condominium"]))
                     or (clean_numeric(condo_match.group(1)) if condo_match else 0.0),
                 "advertised_iptu": clean_numeric(extract_nested(source, ["advertised_iptu", "iptu", "listing.iptu"]))
@@ -290,7 +278,7 @@ def prepare_listings(settings: Settings, known_neighborhoods: list[str] | None =
             })
     listings = pd.DataFrame(records)
     if listings.empty:
-        raise DataQualityError("Nenhum anuncio valido apos a normalizacao")
+        raise DataQualityError("No valid listings after normalization")
     listings["street"] = listings["street"].map(normalize_street)
     with_url = listings["url"] != ""
     url_records = listings[with_url].drop_duplicates(subset=["url"], keep="last")

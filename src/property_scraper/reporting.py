@@ -39,13 +39,14 @@ def generate_report(settings: Settings, run_id: str = "") -> StageResult:
     analysis_path = settings.paths.processed / "analysis.csv"
     stats_path = settings.paths.processed / "neighborhood_stats.csv"
     if not analysis_path.exists() or not stats_path.exists():
-        raise DataQualityError("Execute analyze antes de gerar o relatorio")
+        raise DataQualityError("Run analyze before generating the report")
     analysis = _round_for_report(read_csv_auto(analysis_path))
     stats = _round_for_report(
         read_csv_auto(stats_path).sort_values("itbi_m2_mean", ascending=False)
     )
-    confirmed = analysis[analysis["opportunity_status"] == "confirmada"].copy()
-    estimated = analysis[analysis["opportunity_status"] == "estimada"].copy()
+    eligible = analysis[analysis["ranking_status"] == "parking_eligible"].copy()
+    pending = analysis[analysis["ranking_status"] == "parking_pending_review"].copy()
+    excluded_parking = analysis[analysis["ranking_status"] == "parking_excluded"].copy()
     quality = _quality_table(settings)
     execution = pd.DataFrame([{
         "run_id": run_id,
@@ -62,27 +63,32 @@ def generate_report(settings: Settings, run_id: str = "") -> StageResult:
         "min_new_per_page": settings.min_new_listings_per_page,
     }])
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output = settings.paths.reports / f"relatorio_flip_bh_{timestamp}.xlsx"
+    output = settings.paths.reports / f"bh_property_report_{timestamp}.xlsx"
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         sheets = {
-            "Oportunidades_Confirmadas": confirmed,
-            "Oportunidades_Estimadas": estimated,
-            "Resumo_Bairros": stats,
-            "Todos_Anuncios": analysis,
-            "Qualidade_Dados": quality,
-            "Execucao": execution,
+            "Parking_Eligible": eligible,
+            "Parking_Pending": pending,
+            "Parking_Excluded": excluded_parking,
+            "Neighborhood_Summary": stats,
+            "All_Listings": analysis,
+            "Data_Quality": quality,
+            "Run": execution,
         }
         for name, frame in sheets.items():
             frame.to_excel(writer, sheet_name=name[:31], index=False)
             _format_sheet(writer, name[:31], frame)
     latest = settings.paths.reports / "latest_report.txt"
     latest.write_text(output.name, encoding="utf-8")
+    for previous in settings.paths.reports.glob("bh_property_report_*.xlsx"):
+        if previous != output:
+            previous.unlink()
     return StageResult(
         stage="report",
         artifacts=[str(output), str(latest)],
         counts={
-            "confirmed_opportunities": len(confirmed),
-            "estimated_opportunities": len(estimated),
+            "eligible_parking_opportunities": len(eligible),
+            "pending_parking_opportunities": len(pending),
+            "excluded_parking_opportunities": len(excluded_parking),
             "all_listings": len(analysis),
         },
     )
@@ -160,6 +166,6 @@ def _format_sheet(writer: pd.ExcelWriter, name: str, frame: pd.DataFrame) -> Non
     if "opportunity_status" in frame.columns and len(frame):
         status_col = frame.columns.get_loc("opportunity_status")
         worksheet.conditional_format(1, status_col, len(frame), status_col, {
-            "type": "text", "criteria": "containing", "value": "confirmada",
+            "type": "text", "criteria": "containing", "value": "confirmed",
             "format": workbook.add_format({"bg_color": "#D4EDDA", "font_color": "#155724"}),
         })

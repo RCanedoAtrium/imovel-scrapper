@@ -2,12 +2,12 @@ import json
 from pathlib import Path
 
 from crawlee_scraper import RAW_LISTING_COLUMNS
-from imovel_scrapper.card_validation import (
+from property_scraper.card_validation import (
     best_card_sample,
     missing_card_fields,
     validate_cards,
 )
-from imovel_scrapper.config import load_settings
+from property_scraper.config import load_settings
 
 
 def _card(**overrides):
@@ -72,6 +72,6 @@ def test_validation_writes_evidence_and_keeps_production_pointers(project):
     markdown, report, samples, pagination = map(Path, result.artifacts)
     assert all(path.exists() for path in (markdown, report, samples, pagination))
     payload = json.loads(report.read_text(encoding="utf-8"))
-    assert payload["portals"][0]["status"] == "completo"
-    assert payload["portals"][1]["status"] == "sem card completo"
+    assert payload["portals"][0]["status"] == "complete"
+    assert payload["portals"][1]["status"] == "incomplete card"
     assert payload["portals"][1]["missing_fields"] == ["bathrooms"]

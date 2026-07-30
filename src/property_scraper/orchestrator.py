@@ -69,6 +69,9 @@ def run_pipeline(
         manifest.stages = [stage.to_dict() for stage in stages]
         manifest.finish("success")
         atomic_json(manifest_path, asdict(manifest))
+        for previous in settings.paths.reports.glob("run_*.json"):
+            if previous != manifest_path:
+                previous.unlink()
         return StageResult(
             stage="run",
             artifacts=[artifact for stage in stages for artifact in stage.artifacts] + [str(manifest_path)],

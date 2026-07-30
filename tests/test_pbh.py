@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from imovel_scrapper.sources.pbh import (
+from property_scraper.sources.pbh import (
     ITBI_REQUIRED,
     parse_iptu_competence,
     parse_itbi_competence,

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 
-EvidenceLevel = Literal["confirmado", "provavel", "estimado", "sem_match"]
+EvidenceLevel = Literal["confirmed", "likely", "estimated", "no_match"]
 
 
 @dataclass

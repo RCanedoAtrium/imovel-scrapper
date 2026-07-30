@@ -47,13 +47,13 @@ def _search_url(scraper: CrawleeScraper, neighborhood: str, site: str, max_price
 
 def _write_markdown(path: Path, report: dict[str, Any]) -> None:
     lines = [
-        "# Validação de cards de busca",
+        "# Search-card validation",
         "",
-        f"- Execução: {report['run_id']}",
-        f"- Bairro: {report['parameters']['neighborhood']}",
-        f"- Teto: R$ {report['parameters']['max_price']:,.0f}".replace(",", "."),
-        f"- Páginas por tentativa: {report['parameters']['pages']}",
-        f"- Máximo de tentativas: {report['parameters']['attempts']}",
+        f"- Run: {report['run_id']}",
+        f"- Neighborhood: {report['parameters']['neighborhood']}",
+        f"- Price cap: R$ {report['parameters']['max_price']:,.0f}".replace(",", "."),
+        f"- Pages per attempt: {report['parameters']['pages']}",
+        f"- Maximum attempts: {report['parameters']['attempts']}",
         "",
     ]
     for portal in report["portals"]:
@@ -61,16 +61,16 @@ def _write_markdown(path: Path, report: dict[str, Any]) -> None:
             f"## {portal['site']}",
             "",
             f"- Status: **{portal['status']}**",
-            f"- Busca: [{portal['search_url']}]({portal['search_url']})",
-            f"- Tentativas executadas: {len(portal['attempts'])}",
+            f"- Search: [{portal['search_url']}]({portal['search_url']})",
+            f"- Attempts run: {len(portal['attempts'])}",
         ])
         if portal.get("sample"):
             sample = portal["sample"]
-            lines.append(f"- Anúncio: [{sample['link']}]({sample['link']})")
-            lines.append(f"- Campos ausentes: {', '.join(portal['missing_fields']) or 'nenhum'}")
-            lines.extend(["", "Dados coletados:", json.dumps(sample, ensure_ascii=False, indent=2)])
+            lines.append(f"- Listing: [{sample['link']}]({sample['link']})")
+            lines.append(f"- Missing fields: {', '.join(portal['missing_fields']) or 'none'}")
+            lines.extend(["", "Collected data:", json.dumps(sample, ensure_ascii=False, indent=2)])
         else:
-            lines.append(f"- Motivo: {portal.get('reason', 'nenhum anúncio retornado')}")
+            lines.append(f"- Reason: {portal.get('reason', 'no listings returned')}")
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -103,7 +103,7 @@ def validate_cards(
 ) -> StageResult:
     """Validates card extraction without changing the production listing pointer."""
     if max_price <= 0 or pages < 1 or attempts < 1:
-        raise PipelineError("max_price, pages e attempts devem ser maiores que zero")
+        raise PipelineError("max_price, pages, and attempts must be greater than zero")
     chosen = [site.lower() for site in (sites or settings.sites)]
     run_id = f"card-validation-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
     output_dir = settings.paths.diagnostics / "card-validation" / run_id
@@ -156,13 +156,13 @@ def validate_cards(
 
         sample, missing = selected if selected else ({}, REQUIRED_CARD_FIELDS)
         if sample and not missing:
-            status, reason = "completo", ""
+            status, reason = "complete", ""
         elif sample:
-            status, reason = "sem card completo", "campos ausentes após todas as tentativas"
+            status, reason = "incomplete card", "fields missing after all attempts"
         elif any("error" in attempt_data for attempt_data in attempts_data):
-            status, reason = "falha de acesso", "nenhum anúncio pôde ser analisado"
+            status, reason = "access failure", "no listings could be analyzed"
         else:
-            status, reason = "sem card completo", "nenhum anúncio retornado"
+            status, reason = "incomplete card", "no listings returned"
         portals.append({
             "site": site,
             "status": status,
@@ -195,7 +195,7 @@ def validate_cards(
     pagination_path = output_dir / "pagination.json"
     pagination_path.write_text(json.dumps(all_pagination, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    complete = sum(portal["status"] == "completo" for portal in portals)
+    complete = sum(portal["status"] == "complete" for portal in portals)
     return StageResult(
         stage="validate-cards",
         status="success" if complete == len(chosen) else "warning",
@@ -203,7 +203,7 @@ def validate_cards(
         counts={"portals": len(chosen), "complete": complete},
         warnings=[
             f"{portal['site']}: {portal['status']}" for portal in portals
-            if portal["status"] != "completo"
+            if portal["status"] != "complete"
         ],
         details={"run_id": run_id, "output_dir": str(output_dir)},
     )

@@ -1,4 +1,4 @@
-from imovel_scrapper.normalization import (
+from property_scraper.normalization import (
     clean_numeric,
     extract_area_m2,
     extract_currency,

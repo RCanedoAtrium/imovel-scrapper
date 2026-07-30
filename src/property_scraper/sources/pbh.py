@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -39,7 +38,7 @@ class CKANClient:
         self.api_base_url = api_base_url.rstrip("/")
         self.timeout = timeout
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "imovel-scrapper/2.0"})
+        self.session.headers.update({"User-Agent": "bh-property-scraper/2.0"})
 
     def package_show(self, dataset: str) -> dict[str, Any]:
         try:
@@ -55,10 +54,10 @@ class CKANClient:
                 payload = self._package_show_via_browser(dataset)
             except Exception as browser_exc:
                 raise SourceError(
-                    f"Falha ao consultar o catalogo CKAN para {dataset}: HTTP={exc}; navegador={browser_exc}"
+                    f"Could not query the CKAN catalog for {dataset}: HTTP={exc}; browser={browser_exc}"
                 ) from browser_exc
         if not payload.get("success") or not isinstance(payload.get("result"), dict):
-            raise SourceError(f"Resposta CKAN invalida para o dataset {dataset}")
+            raise SourceError(f"Invalid CKAN response for dataset {dataset}")
         return payload["result"]
 
     def download(self, url: str, destination: Path, expected_size: int = 0) -> None:
@@ -73,10 +72,10 @@ class CKANClient:
                             stream.write(chunk)
             actual_size = temporary.stat().st_size
             if actual_size == 0:
-                raise SourceError(f"Download vazio: {url}")
+                raise SourceError(f"Empty download: {url}")
             if expected_size and actual_size != expected_size:
                 raise SourceError(
-                    f"Tamanho divergente em {url}: esperado {expected_size}, recebido {actual_size}"
+                    f"Unexpected size for {url}: expected {expected_size}, received {actual_size}"
                 )
             os.replace(temporary, destination)
         except requests.HTTPError as exc:
@@ -87,7 +86,7 @@ class CKANClient:
                 if expected_size and actual_size != expected_size:
                     destination.unlink(missing_ok=True)
                     raise SourceError(
-                        f"Tamanho divergente em {url}: esperado {expected_size}, recebido {actual_size}"
+                        f"Unexpected size for {url}: expected {expected_size}, received {actual_size}"
                     )
                 return
             raise
@@ -183,7 +182,7 @@ def select_iptu_resource(resources: list[dict[str, Any]]) -> tuple[str, dict[str
         if _resource_format(resource) == "CSV" and (competence := parse_iptu_competence(resource))
     ]
     if not candidates:
-        raise SourceError("Nenhum recurso CSV mensal do IPTU Centro-Sul foi encontrado")
+        raise SourceError("No monthly Centro-Sul IPTU CSV resource was found")
     return max(candidates, key=lambda item: item[0])
 
 
@@ -201,7 +200,7 @@ def select_itbi_resources(resources: list[dict[str, Any]], start: str) -> dict[s
         ):
             selected[competence] = resource
     if not selected:
-        raise SourceError(f"Nenhum recurso mensal do ITBI encontrado a partir de {start}")
+        raise SourceError(f"No monthly ITBI resource was found from {start}")
     return selected
 
 
@@ -219,11 +218,11 @@ def validate_csv_schema(path: Path, required: set[str]) -> list[str]:
                 if re.sub(r"[^A-Z0-9]", "", column) not in signatures
             )
             if missing:
-                raise SchemaError(f"Colunas ausentes em {path.name}: {', '.join(missing)}")
+                raise SchemaError(f"Missing columns in {path.name}: {', '.join(missing)}")
             return columns
         except (UnicodeDecodeError, pd.errors.ParserError) as exc:
             errors.append(exc)
-    raise SchemaError(f"Nao foi possivel ler o cabecalho de {path}: {errors}")
+    raise SchemaError(f"Could not read the header of {path}: {errors}")
 
 
 class PBHSynchronizer:
@@ -231,25 +230,7 @@ class PBHSynchronizer:
         self.settings = settings
         self.client = client or CKANClient(settings.api_base_url)
 
-    def migrate_legacy(self) -> list[str]:
-        migrated: list[str] = []
-        legacy_itbi = self.settings.paths.root / "data" / "raw" / "itbi"
-        if legacy_itbi.exists():
-            for source in legacy_itbi.glob("*.csv"):
-                target = self.settings.paths.itbi / source.name
-                if not target.exists():
-                    shutil.copy2(source, target)
-                    migrated.append(str(target))
-        legacy_iptu = self.settings.paths.root / "data" / "raw" / "iptu"
-        if legacy_iptu.exists() and not any(self.settings.paths.iptu.glob("*.csv")):
-            for source in legacy_iptu.glob("*.csv"):
-                target = self.settings.paths.iptu / source.name
-                shutil.copy2(source, target)
-                migrated.append(str(target))
-        return migrated
-
     def sync(self, force: bool = False) -> StageResult:
-        migrated = self.migrate_legacy()
         artifacts: list[SourceArtifact] = []
         warnings: list[str] = []
 
@@ -264,6 +245,7 @@ class PBHSynchronizer:
             force=force,
         )
         artifacts.append(iptu_artifact)
+        removed_iptu_snapshots = self._prune_iptu_snapshots(Path(iptu_artifact.path))
         warnings.extend(self._iptu_staleness_warning(competence))
 
         itbi_package = self.client.package_show(self.settings.itbi_dataset)
@@ -288,7 +270,7 @@ class PBHSynchronizer:
             {
                 "synced_at": datetime.now(timezone.utc).isoformat(),
                 "artifacts": [asdict(item) for item in artifacts],
-                "legacy_migrated": migrated,
+                "removed_iptu_snapshots": removed_iptu_snapshots,
                 "warnings": warnings,
             },
         )
@@ -301,11 +283,23 @@ class PBHSynchronizer:
                 "itbi_resources": len(itbi_resources),
                 "downloaded": sum(item.status == "downloaded" for item in artifacts),
                 "reused": sum(item.status == "reused" for item in artifacts),
-                "legacy_migrated": len(migrated),
+                "removed_iptu_snapshots": len(removed_iptu_snapshots),
             },
             warnings=warnings,
             details={"latest_iptu": competence, "latest_itbi": max(itbi_resources)},
         )
+
+    def _prune_iptu_snapshots(self, current: Path) -> list[str]:
+        current = current.resolve()
+        current_metadata = current.with_suffix(current.suffix + ".metadata.json")
+        removed: list[str] = []
+        for path in self.settings.paths.iptu.iterdir():
+            if not path.is_file() or path.resolve() in {current, current_metadata.resolve()}:
+                continue
+            if path.suffix.lower() == ".csv" or path.name.endswith(".csv.metadata.json"):
+                path.unlink()
+                removed.append(str(path))
+        return removed
 
     def _sync_resource(
         self,
@@ -318,7 +312,7 @@ class PBHSynchronizer:
     ) -> SourceArtifact:
         url = _resource_url(resource)
         if not url:
-            raise SourceError(f"Recurso {resource.get('id')} nao possui URL de download")
+            raise SourceError(f"Resource {resource.get('id')} has no download URL")
         filename = Path(url.split("?", 1)[0]).name or f"{source}_{competence.replace('-', '')}.csv"
         destination = directory / filename
         remote_hash = str(resource.get("hash") or "").strip().lower()
@@ -370,6 +364,6 @@ class PBHSynchronizer:
         age = (date.today() - snapshot).days
         if age > self.settings.iptu_staleness_days:
             return [
-                f"IPTU mais recente ({competence}) esta ha aproximadamente {age} dias da data atual"
+                f"The latest IPTU snapshot ({competence}) is approximately {age} days old"
             ]
         return []

@@ -141,7 +141,9 @@ def parse_listing_address(title: str) -> tuple[str, str, str]:
         address = address.replace(cep_match.group(0), "")
     address = re.sub(r"\b(Belo Horizonte|MG)\b", "", address, flags=re.IGNORECASE)
     number_matches = re.findall(r"\b\d{1,5}\b", address)
-    number = number_matches[-1] if number_matches else ""
+    # The first number follows the street in the address segment. Later values
+    # commonly describe bedrooms, bathrooms, or parking spaces.
+    number = number_matches[0] if number_matches else ""
     street_match = re.search(
         r"\b(rua|r|avenida|av|alameda|al|praca|pc|travessa|tv)\.?\s+([^,0-9]+)",
         address,

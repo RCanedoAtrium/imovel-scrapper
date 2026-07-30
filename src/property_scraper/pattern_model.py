@@ -15,8 +15,8 @@ from .normalization import normalize_neighborhood, normalize_street
 
 
 VALID_PATTERNS = {"P1", "P2", "P3", "P4", "P5"}
-MODEL_VERSION = "random-forest-sem-preco-v2"
-RARE_STREET = "RUA_RARA"
+MODEL_VERSION = "random-forest-no-price-v2"
+RARE_STREET = "RARE_STREET"
 STREET_THRESHOLD = 20
 N_ESTIMATORS = 300
 RANDOM_SEED = 42
@@ -46,7 +46,7 @@ class RandomForestPatternModel:
         required = {"neighborhood", "street", "area_m2", "finish_pattern"}
         missing = sorted(required.difference(transactions.columns))
         if missing:
-            raise DataQualityError("Colunas ausentes para treinar o Random Forest: " + ", ".join(missing))
+            raise DataQualityError("Missing columns for Random Forest training: " + ", ".join(missing))
         train = transactions[list(required | ({"competence"} & set(transactions.columns)))].copy()
         train["neighborhood"] = train["neighborhood"].map(normalize_neighborhood)
         train["street"] = train["street"].map(normalize_street)
@@ -61,7 +61,7 @@ class RandomForestPatternModel:
     def _fit(self, transactions: pd.DataFrame) -> None:
         train = self._training_frame(transactions)
         if len(train) <= 10 or train["finish_pattern"].nunique() < 2:
-            raise DataQualityError("Dados insuficientes para treinar o Random Forest de padrao")
+            raise DataQualityError("Insufficient data to train the finish-pattern Random Forest")
 
         street_counts = train.loc[train["street"].ne(""), "street"].value_counts()
         self.frequent_streets = set(street_counts[street_counts >= STREET_THRESHOLD].index)
@@ -117,7 +117,7 @@ class RandomForestPatternModel:
 
     def predict_batch(self, listings: pd.DataFrame) -> list[PatternPrediction]:
         if self.pipeline is None:
-            raise DataQualityError("Random Forest nao treinado")
+            raise DataQualityError("Random Forest has not been trained")
         frame = listings[["neighborhood", "street", "area_m2"]].copy()
         frame["neighborhood"] = frame["neighborhood"].map(normalize_neighborhood)
         normalized_streets = frame["street"].map(normalize_street)

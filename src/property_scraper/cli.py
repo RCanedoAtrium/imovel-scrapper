@@ -4,7 +4,6 @@ import argparse
 import json
 import sys
 import uuid
-from dataclasses import asdict
 
 from .analysis import analyze
 from .card_validation import validate_cards
@@ -18,49 +17,49 @@ from .sources.pbh import PBHSynchronizer
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Pipeline modular de oportunidades imobiliarias em BH")
-    parser.add_argument("--config", default="config.json", help="Arquivo JSON de configuracao")
+    parser = argparse.ArgumentParser(description="Modular pipeline for Belo Horizonte real-estate opportunities")
+    parser.add_argument("--config", default="config.json", help="Path to the JSON configuration file")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    sync = commands.add_parser("sync-pbh", help="Sincroniza os CSVs oficiais da PBH")
-    sync.add_argument("--force", action="store_true", help="Baixa novamente os recursos remotos")
+    sync = commands.add_parser("sync-pbh", help="Synchronize official PBH CSV files")
+    sync.add_argument("--force", action="store_true", help="Download remote resources again")
 
-    scrape = commands.add_parser("scrape", help="Coleta anuncios dos portais")
-    scrape.add_argument("--sites", help="Portais separados por virgula")
-    scrape.add_argument("--pages", type=int, help="Paginas por bairro")
-    scrape.add_argument("--max-price", type=float, help="Teto global aplicado a todos os bairros")
-    scrape.add_argument("--neighborhoods", help="Bairros separados por virgula para coleta incremental")
-    scrape.add_argument("--append-latest", action="store_true", help="Mescla a coleta ao último run, sem repetir seus bairros")
+    scrape = commands.add_parser("scrape", help="Collect listings from real-estate portals")
+    scrape.add_argument("--sites", help="Comma-separated portal names")
+    scrape.add_argument("--pages", type=int, help="Pages per neighborhood")
+    scrape.add_argument("--max-price", type=float, help="Global price cap applied to every neighborhood")
+    scrape.add_argument("--neighborhoods", help="Comma-separated neighborhoods for an incremental collection")
+    scrape.add_argument("--append-latest", action="store_true", help="Merge collection into the latest run without repeating its neighborhoods")
 
-    validate = commands.add_parser("validate-cards", help="Valida campos extraidos dos cards sem alterar dados de producao")
+    validate = commands.add_parser("validate-cards", help="Validate extracted card fields without changing production data")
     validate.add_argument("--neighborhood", default="BELVEDERE")
     validate.add_argument("--max-price", type=float, default=800000)
     validate.add_argument("--pages", type=int, default=4)
     validate.add_argument("--attempts", type=int, default=3)
-    validate.add_argument("--sites", help="Portais separados por virgula")
+    validate.add_argument("--sites", help="Comma-separated portal names")
 
-    commands.add_parser("prepare", help="Normaliza fontes locais e grava datasets CSV")
+    commands.add_parser("prepare", help="Normalize local sources and write CSV datasets")
 
-    analysis = commands.add_parser("analyze", help="Cruza, classifica e identifica oportunidades")
+    analysis = commands.add_parser("analyze", help="Match, classify, and identify opportunities")
     analysis.add_argument("--classifier", choices=["ml", "heuristics"])
     analysis.add_argument("--discount", type=float)
 
-    report = commands.add_parser("report", help="Gera o relatorio Excel")
+    report = commands.add_parser("report", help="Generate the Excel report")
     report.add_argument("--run-id", default="manual")
 
-    run = commands.add_parser("run", help="Executa todas as etapas")
+    run = commands.add_parser("run", help="Run every pipeline stage")
     run.add_argument("--force-sync", action="store_true")
     run.add_argument(
         "--skip-reference-sync",
         action="store_true",
-        help="Usa os CSVs ITBI/IPTU locais sem consultar a PBH",
+        help="Use local ITBI/IPTU CSV files without querying PBH",
     )
     run.add_argument(
         "--skip-scrape",
         action="store_true",
-        help="Usa o ultimo run local de anuncios sem acessar os portais",
+        help="Use the latest local listing run without accessing the portals",
     )
-    run.add_argument("--report", action="store_true", help="Gera tambem o relatorio Excel")
+    run.add_argument("--report", action="store_true", help="Also generate the Excel report")
     return parser
 
 
@@ -73,12 +72,12 @@ def execute(args: argparse.Namespace):
         neighborhoods = [name.strip() for name in args.neighborhoods.split(",")] if args.neighborhoods else None
         if args.max_price is not None:
             if args.max_price <= 0:
-                raise PipelineError("O teto global deve ser maior que zero")
+                raise PipelineError("The global price cap must be greater than zero")
         base_run_id = None
         if args.append_latest:
             latest = settings.paths.listings / "latest.txt"
             if not latest.exists():
-                raise PipelineError("Não existe run anterior para mesclar")
+                raise PipelineError("There is no previous run to merge")
             base_run_id = latest.read_text(encoding="utf-8").strip()
         return ListingCollector(settings).collect(
             sites=sites,
@@ -112,7 +111,7 @@ def execute(args: argparse.Namespace):
             scrape=not args.skip_scrape,
             report=args.report,
         )
-    parser_error = f"Comando desconhecido: {args.command}"
+    parser_error = f"Unknown command: {args.command}"
     raise PipelineError(parser_error)
 
 

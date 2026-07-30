@@ -1,17 +1,58 @@
-# Imóvel Scrapper
+# Belo Horizonte Property Scraper
 
-Pipeline modular para sincronizar dados oficiais da PBH, coletar anúncios de apartamentos em Belo Horizonte e identificar oportunidades de compra com desconto ou arbitragem de padrão construtivo.
+A Python pipeline for collecting apartment listings in Belo Horizonte, Brazil, combining them with public PBH property and transaction data, and ranking potential investment opportunities.
 
-Os datasets canônicos são exclusivamente CSV compatível com Excel em pt-BR: UTF-8 com BOM, separador `;` e decimal `,`.
+It downloads official IPTU and ITBI datasets, collects listings from major Brazilian real-estate portals, normalizes the data, estimates each property's finish pattern, and exports an Excel report.
 
-## Instalação
+## Features
+
+- Synchronizes official IPTU and ITBI CSV files from the [PBH open-data portal](https://dados.pbh.gov.br/).
+- Collects apartment listings from Viva Real, ZAP Imóveis, OLX, QuintoAndar, and Imovelweb.
+- Applies local price and area filters even when a portal ignores URL filters.
+- Uses adaptive pagination, URL deduplication, and card-validation diagnostics.
+- Normalizes Brazilian addresses, neighborhoods, CEPs, prices, and floor areas.
+- Matches listings to municipal building records when possible; otherwise predicts finish patterns with a Random Forest model that excludes price features.
+- Ranks opportunities by neighborhood and finish-pattern price differences, with parking-space review rules.
+- Creates a formatted Excel report and machine-readable run manifests.
+
+## Requirements
+
+- Python 3.10+
+- Chromium for Playwright
+
+## Installation
 
 ```powershell
 python -m pip install -r requirements.txt
 playwright install chromium
 ```
 
-## Fluxo
+## Configuration
+
+Project settings are stored in [config.json](config.json). The most useful options are:
+
+```json
+{
+  "neighborhoods": ["SAVASSI", "LOURDES"],
+  "sites": ["vivareal", "zap", "olx", "quintoandar", "imovelweb"],
+  "max_price": 800000,
+  "min_area_m2": 40,
+  "pages_per_neighborhood": 4,
+  "min_pages_per_neighborhood": 2,
+  "min_new_listings_per_page": 3,
+  "discount_threshold": 0.20
+}
+```
+
+`max_price` is applied across every configured neighborhood. It can also be overridden for a single collection:
+
+```powershell
+python main.py scrape --max-price 800000
+```
+
+## Usage
+
+Run the stages individually:
 
 ```powershell
 python main.py sync-pbh
@@ -21,48 +62,40 @@ python main.py analyze
 python main.py report
 ```
 
-O teto global da coleta pode ser persistido em `config.json` e vale para todos os bairros daquela execução:
-
-```json
-"max_price": 800000
-```
-
-Ele também pode ser sobrescrito pontualmente na execução:
+Or run the full workflow:
 
 ```powershell
-python main.py scrape --max-price 800000
+python main.py run --report
 ```
 
-O coletor envia o limite a cada portal e reaplica a regra localmente antes de salvar os anúncios. Assim, resultados acima do teto são descartados mesmo quando um portal ignora o parâmetro de URL.
-
-## Paginação adaptativa
-
-A profundidade da busca é controlada por três opções:
-
-```json
-"pages_per_neighborhood": 4,
-"min_pages_per_neighborhood": 2,
-"min_new_listings_per_page": 3
-```
-
-O scraper sempre visita pelo menos duas páginas de cada combinação portal/bairro. Depois disso, continua enquanto a página atual trouxer pelo menos três anúncios novos dentro do teto, até o máximo de quatro páginas. Repetições e anúncios acima do teto não contam para decidir se a busca deve avançar.
-
-As métricas de cada página ficam em `data/listings/<run_id>/pagination.json`, incluindo quantidade bruta, anúncios novos, anúncios dentro do teto e o motivo da parada.
-
-Para executar todas as etapas em sequência:
+To reuse recently collected reference data and listings:
 
 ```powershell
-python main.py run
+python main.py run --skip-reference-sync --skip-scrape --report
 ```
 
-O fluxo orquestrado tem quatro etapas: coleta de referência (ITBI/IPTU), scraper, tratamento dos dados locais e inferência dos padrões. Para reutilizar os dados coletados recentemente e executar somente tratamento e inferência:
+Use the card validator before enabling a new or changed portal:
 
 ```powershell
-python main.py run --skip-reference-sync --skip-scrape
+python main.py validate-cards --sites vivareal --neighborhood BELVEDERE --max-price 800000
 ```
 
-A inferência usa o Random Forest otimizado com bairro, rua e área. Ruas com menos de 20 ocorrências no treino são agrupadas em `RUA_RARA`; preço e preço por m² não entram no modelo. O match determinístico com IPTU continua tendo prioridade.
+## Outputs
 
-Os comandos usam `config.json`. A sincronização consulta a API CKAN da PBH, mantém os snapshots oficiais em `data/iptu` e `data/itbi`, e grava datasets canônicos em `data/processed`. O relatório Excel e os manifestos de execução ficam em `data/reports`.
+- `data/iptu` and `data/itbi`: downloaded PBH source files.
+- `data/listings/<run_id>`: portal-level raw listings and pagination statistics.
+- `data/processed`: normalized datasets, analysis output, and manifests.
+- `data/reports`: the latest `bh_property_report_*.xlsx` file and run manifest.
+- `data/diagnostics/card-validation`: portal-card validation reports and samples.
 
-Uma falha em qualquer portal selecionado interrompe a coleta e impede a geração de relatório parcial.
+The project retains only the current canonical source snapshots, latest listing run, latest report, and latest run manifest.
+
+## Documentation
+
+- [Finish-pattern model](documentacao/modelo.md)
+- [Scraper maintenance guide](documentacao/scraper.md)
+- [Investment criteria](documentacao/criterios_compra_revenda.md)
+
+## Notes
+
+The codebase and generated outputs are in English. Brazilian Portuguese terms are retained only where they are needed to consume PBH source columns, construct portal URLs, or parse listing text.

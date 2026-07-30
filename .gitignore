@@ -37,11 +37,6 @@ data/
 *.xlsx
 *.csv
 
-# Artefatos gerados pela investigacao de modelos
-investigacao/resultados/*
-!investigacao/resultados/.gitkeep
-catboost_info/
-
 # OS metadata
 .DS_Store
 Thumbs.db

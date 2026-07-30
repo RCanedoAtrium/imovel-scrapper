@@ -21,7 +21,7 @@ SUPPORTED_SITES = {"vivareal", "zap", "olx", "quintoandar", "imovelweb"}
 
 
 class ListingCollector:
-    """Executa cada portal isoladamente e aplica um contrato minimo comum."""
+    """Run each portal independently and enforce a shared minimum contract."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -40,14 +40,14 @@ class ListingCollector:
         chosen = [site.lower() for site in (sites or self.settings.sites)]
         invalid = sorted(set(chosen).difference(SUPPORTED_SITES))
         if invalid:
-            raise SourceError(f"Portais nao suportados: {', '.join(invalid)}")
+            raise SourceError(f"Unsupported portals: {', '.join(invalid)}")
         run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         run_dir = self.settings.paths.listings / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         target_neighborhoods = neighborhoods or self.settings.neighborhoods
         base_dir = self.settings.paths.listings / base_run_id if base_run_id else None
         if base_dir is not None and not base_dir.is_dir():
-            raise SourceError(f"Execução-base não encontrada: {base_run_id}")
+            raise SourceError(f"Base run not found: {base_run_id}")
         pages = pages_per_neighborhood or self.settings.pages_per_neighborhood
         ceiling = max_price if max_price is not None else self.settings.max_price
         filters = {
@@ -92,7 +92,7 @@ class ListingCollector:
                     item for item in contract_items if self._canonical_site(item.get("site")) == site
                 ]
                 if not portal_items:
-                    failures.append(f"{site}: nenhum anuncio valido retornado")
+                    failures.append(f"{site}: no valid listings returned")
                     continue
                 site_items = [item for item in portal_items if self._matches_price_filter(item, filters)]
                 rejected_by_price += sum(
@@ -134,10 +134,13 @@ class ListingCollector:
             diagnostic = self.settings.paths.diagnostics / f"scrape_{run_id}.txt"
             diagnostic.write_text("\n".join(failures), encoding="utf-8")
             shutil.rmtree(run_dir, ignore_errors=True)
-            raise SourceError("Falha em portal selecionado; coleta descartada. " + " | ".join(failures))
+            raise SourceError("A selected portal failed; collection discarded. " + " | ".join(failures))
 
         latest = self.settings.paths.listings / "latest.txt"
         latest.write_text(run_id, encoding="utf-8")
+        for previous in self.settings.paths.listings.iterdir():
+            if previous.is_dir() and previous != run_dir:
+                shutil.rmtree(previous)
         return StageResult(
             stage="scrape",
             artifacts=artifacts,

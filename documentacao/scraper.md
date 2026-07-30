@@ -1,128 +1,43 @@
-# Processo de otimização e replicação do scraper para novos portais
+# Scraper maintenance guide
 
-## Objetivo operacional
+The scraper collects search-result cards rather than detail pages and produces a common contract for every portal. Priorities are correct location and filters, complete required fields, efficient deduplication and pagination, and reproducible diagnostics when a portal changes.
 
-O scraper deve coletar **cards da página de busca**, não depender de páginas de
-detalhe, e entregar todos os portais no mesmo contrato de dados. O processo de
-otimização prioriza, nesta ordem:
+## Listing-card contract
 
-1. correção da localização e dos filtros;
-2. cobertura e qualidade dos campos dos cards;
-3. deduplicação e paginação eficiente;
-4. diagnóstico reproduzível quando o layout ou o acesso do portal mudar.
+Every portal must preserve the column order defined by `RAW_LISTING_COLUMNS`. `link`, `price`, and `area` are mandatory; unavailable optional fields must be empty strings.
 
-O código principal está em `crawlee_scraper.py`; a gravação e a validação de
-execuções ficam em `src/imovel_scrapper/sources/listings.py` e
-`src/imovel_scrapper/card_validation.py`.
+The primary implementation is `crawlee_scraper.py`. Collection and validation are implemented in `src/property_scraper/sources/listings.py` and `src/property_scraper/card_validation.py`.
 
-## Contrato obrigatório de saída
+## Adding a portal
 
-Todo portal deve produzir as colunas abaixo, mantendo a ordem e usando string
-vazia quando um campo não estiver disponível no card:
+1. Map the portal's neighborhood search URL, supported price/area filters, and actual pagination behavior.
+2. Add its identifier to `SUPPORTED_SITES`, generate start URLs, and enable it in `config.json` only after validation.
+3. Create a dedicated Crawlee handler that waits for a stable card selector and fails explicitly if cards do not render.
+4. Prefer semantic card selectors (`data-testid`, `data-qa`, and `aria-label`) over generated CSS classes; use text parsing only as a fallback.
+5. Validate the listing location from visible card content. Search URLs can include sponsored properties from other neighborhoods or cities.
+6. Register each page through the shared pagination logic; do not duplicate deduplication behavior in a handler.
+7. Run `validate-cards` and confirm a complete card before enabling production collection.
 
-```text
-title, street, number, location, neighborhood, price, area, bedrooms,
-bathrooms, parking_spaces, condominium, advertised_iptu, link, site
-```
+## Filters and adaptive pagination
 
-`link`, `price` e `area` são obrigatórios para o anúncio ser aceito. O método
-`CrawleeScraper.listing_with_contract()` garante o formato antes de escrever o
-CSV com UTF-8 BOM e separador `;`.
+The collector sends price and minimum-area filters when a portal URL supports them, then reapplies the same rules locally. A listing identity is its normalized URL without query parameters or a trailing slash.
 
-## Receita para adicionar um portal
+The scraper always visits at least `min_pages_per_neighborhood` pages. It keeps going only while the current page contributes at least `min_new_listings_per_page` new listings inside the configured filters, stopping at `pages_per_neighborhood`. Page metrics and stop decisions are written to `data/listings/<run_id>/pagination.json`.
 
-1. **Mapear a busca manualmente.** Identificar a URL de busca por bairro, os
-   filtros de preço/área aceitos e o mecanismo real de paginação. Confirmar se
-   é parâmetro de URL, botão "ver mais" ou scroll infinito; não supor que
-   `?page=N` funciona.
-2. **Adicionar o identificador do portal.** Incluir o nome em
-   `SUPPORTED_SITES`, na geração de URLs iniciais (`generate_start_urls`) e em
-   `config.json` quando o portal estiver aprovado.
-3. **Criar um handler Crawlee exclusivo.** Usar um `label` próprio, esperar um
-   seletor estável de card e falhar explicitamente se cards não renderizarem.
-   Isso aciona retry em vez de transformar bloqueio, Cloudflare ou mudança de
-   layout em uma coleta vazia.
-4. **Extrair do card com seletores específicos primeiro.** Reutilizar
-   `CARD_METADATA_HELPERS` e passar seletores semânticos (`data-testid`,
-   `data-qa`, `aria-label`) para rua, área, quartos, banheiros, vagas,
-   condomínio e IPTU. Parsing de texto deve ser apenas fallback.
-5. **Normalizar o item.** Preencher `title`, `price`, `area`, `link`,
-   `location`, `neighborhood` e `site`; depois aplicar
-   `listing_with_contract()` para completar o restante do contrato.
-6. **Validar localização no card.** A URL de busca não basta, pois alguns
-   portais inserem anúncios patrocinados de outros bairros/cidades. Criar uma
-   função equivalente a `is_olx_location_match()` e aceitar somente cards cujo
-   texto visível contenha Belo Horizonte e o bairro solicitado.
-7. **Integrar a paginação adaptativa.** Depois de extrair uma página, chamar
-   `store_page()`/`register_page()`. Não duplicar a lógica de deduplicação ou
-   de parada dentro do handler.
-8. **Validar antes de ativar produção.** Executar `validate-cards` para o
-   novo portal, corrigir seletores até obter card completo e só então incluí-lo
-   no `config.json` de produção.
+## Quick validation
 
-## Filtros, deduplicação e paginação
-
-O teto de preço e a área mínima são enviados ao portal quando a URL suporta os
-parâmetros, mas são sempre reaplicados localmente. Isso evita que resultados
-fora do limite contaminem a base quando o portal ignora o filtro de URL.
-
-Cada combinação `portal + bairro` mantém uma lista de links já vistos. A
-identidade do anúncio é a URL normalizada, sem query string e sem barra final.
-Uma página repetida, portanto, não aumenta a coleta nem mantém a paginação
-aberta artificialmente.
-
-Após o mínimo de páginas configurado, a próxima página só é solicitada se ela
-trouxer pelo menos `min_new_listings_per_page` anúncios novos dentro dos
-filtros. As decisões e contagens ficam em:
-
-```text
-data/listings/<run_id>/pagination.json
-```
-
-Campos úteis para diagnosticar eficiência: `raw_listings`, `new_unique_listings`,
-`new_within_price`, rejeições por preço/área/localização e `decision`.
-
-## Validação rápida de um portal novo
-
-Executar sem modificar o ponteiro da coleta de produção:
+Run validation without changing the production listing pointer:
 
 ```powershell
-python main.py validate-cards --sites novoportal --neighborhood BELVEDERE --max-price 800000 --pages 4 --attempts 3
+python main.py validate-cards --sites newportal --neighborhood BELVEDERE --max-price 800000 --pages 4 --attempts 3
 ```
 
-O comando grava em `data/diagnostics/card-validation/...`:
+Review the generated `report.md`, `report.json`, `samples.csv`, and `pagination.json`. Approve a portal only when a complete card, correct location, and non-repeated URLs are present.
 
-- `report.md` e `report.json` com URL, tentativas, campos ausentes e amostra;
-- `samples.csv` no contrato comum;
-- `pagination.json` por tentativa.
+## Maintenance checklist
 
-Só considerar o portal aprovado se houver card completo, localização correta e
-URLs sem repetição. Se falhar, preservar a evidência e corrigir o seletor ou a
-estratégia de navegação, em vez de aceitar resultado parcial.
-
-## Testes mínimos antes de liberar
-
-Adicionar testes de unidade/integrados para:
-
-- gerar a URL com bairro, teto e área mínima corretos;
-- extrair e validar `link`, preço e área;
-- rejeitar cards de bairro ou cidade diferente;
-- validar paginação nativa do portal (URL, botão ou scroll);
-- deduplicar links entre páginas;
-- garantir que o resultado tenha exatamente `RAW_LISTING_COLUMNS`;
-- testar que filtros locais descartam preço/área fora do limite.
-
-Os testes existentes em `tests/test_pipeline_integration.py` servem como
-modelo. Para mudanças de layout, começar por `validate-cards`, não pela coleta
-completa.
-
-## Checklist de manutenção
-
-- Rodar `validate-cards` quando um portal reduzir volume ou tiver campos vazios.
-- Inspecionar `pagination.json` para detectar repetição ou parada precoce.
-- Preferir seletores semânticos a classes CSS geradas.
-- Tratar ausência de cards como falha recuperável, com screenshot/diagnóstico.
-- Manter o nome do portal consistente entre URL, `site`, CSV e
-  `SUPPORTED_SITES`.
-- Não alterar silenciosamente o contrato de colunas: qualquer campo novo exige
-  atualização do contrato, normalização, relatório e testes.
+- Run `validate-cards` when a portal's volume drops or fields become empty.
+- Inspect `pagination.json` for repeated pages or premature stops.
+- Keep the portal name consistent across its URL generator, `site` field, CSV file, and configuration.
+- Treat a missing card as a recoverable failure with diagnostic evidence.
+- Update the contract, normalization, report, and tests together whenever a field changes.

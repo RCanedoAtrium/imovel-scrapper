@@ -1,6 +1,7 @@
 import os
 import re
 import asyncio
+import shutil
 import unicodedata
 import urllib.parse
 import uuid
@@ -74,9 +75,9 @@ const cardMetadata = (card, options = {}) => {
 """
 
 class CrawleeScraper:
-    """Standalone modular web scraper for VivaReal, ZAP Imóveis, OLX, QuintoAndar, and Imovelweb using Crawlee and Playwright."""
+    """Scraper do pipeline para VivaReal, ZAP, OLX, QuintoAndar e Imovelweb."""
     
-    def __init__(self, raw_data_path="data/raw/anuncios_vivareal.csv"):
+    def __init__(self, raw_data_path=None):
         self.raw_data_path = raw_data_path
         self.pagination_stats = []
         self._seen_by_query = {}
@@ -335,10 +336,10 @@ class CrawleeScraper:
         self._seen_by_query = {}
         start_urls = self.generate_start_urls(neighborhoods, sites, price_filters)
         if not start_urls:
-            print("Nenhum link de bairro gerado.")
+            print("No neighborhood links were generated.")
             return []
             
-        print(f"Iniciando Crawlee PlaywrightCrawler para {len(neighborhoods)} bairros em {len(start_urls)} URLs alvo...")
+        print(f"Starting Crawlee PlaywrightCrawler for {len(neighborhoods)} neighborhoods across {len(start_urls)} target URLs...")
         
         # Isolate Crawlee persistence per run. This avoids Windows file locks from
         # an interrupted or overlapping prior process and prevents data mixing.
@@ -418,8 +419,8 @@ class CrawleeScraper:
                 )
             except Exception as e:
                 context.log.warning(f"Timeout VivaReal em {neighborhood}: {e}")
-                os.makedirs("data/screenshots", exist_ok=True)
-                await page.screenshot(path=f"data/screenshots/vivareal_{self.slugify(neighborhood)}_error.png")
+                os.makedirs("data/diagnostics/screenshots", exist_ok=True)
+                await page.screenshot(path=f"data/diagnostics/screenshots/vivareal_{self.slugify(neighborhood)}_error.png")
                 raise RuntimeError(
                     f"VivaReal did not render listing cards for {neighborhood}"
                 ) from e
@@ -461,11 +462,11 @@ class CrawleeScraper:
             """)
 
             if not listings:
-                os.makedirs("data/screenshots", exist_ok=True)
-                await page.screenshot(path=f"data/screenshots/vivareal_{self.slugify(neighborhood)}_empty.png")
+                os.makedirs("data/diagnostics/screenshots", exist_ok=True)
+                await page.screenshot(path=f"data/diagnostics/screenshots/vivareal_{self.slugify(neighborhood)}_empty.png")
                 raise RuntimeError(f"VivaReal returned no extractable cards for {neighborhood}")
             
-            context.log.info(f"[VivaReal] Encontrados {len(listings)} anúncios em {neighborhood}.")
+            context.log.info(f"[VivaReal] Found {len(listings)} listings in {neighborhood}.")
             current_page_match = re.search(r'[?&]pagina=(\d+)', url)
             current_page = int(current_page_match.group(1)) if current_page_match else 1
             should_continue = await store_page(listings, site, neighborhood, current_page, context)
@@ -481,7 +482,7 @@ class CrawleeScraper:
             user_data = context.request.user_data
             neighborhood = user_data.get("neighborhood", "Desconhecido")
             site = user_data.get("site", "Zap Imóveis")
-            context.log.info(f"Processando ZAP Imóveis: {neighborhood} -> {url}")
+            context.log.info(f"Processing ZAP Imóveis: {neighborhood} -> {url}")
             
             page = context.page
             try:
@@ -491,8 +492,8 @@ class CrawleeScraper:
                 )
             except Exception as e:
                 context.log.warning(f"Timeout ZAP em {neighborhood}: {e}")
-                os.makedirs("data/screenshots", exist_ok=True)
-                await page.screenshot(path=f"data/screenshots/zap_{self.slugify(neighborhood)}_error.png")
+                os.makedirs("data/diagnostics/screenshots", exist_ok=True)
+                await page.screenshot(path=f"data/diagnostics/screenshots/zap_{self.slugify(neighborhood)}_error.png")
                 raise RuntimeError(
                     f"ZAP did not render listing cards for {neighborhood}"
                 ) from e
@@ -533,13 +534,13 @@ class CrawleeScraper:
                 }
             """)
             
-            context.log.info(f"[ZAP Imóveis] Encontrados {len(listings)} anúncios em {neighborhood}.")
+            context.log.info(f"[ZAP Imóveis] Found {len(listings)} listings in {neighborhood}.")
             if not listings:
                 page_title = await page.title()
                 user_agent = await page.evaluate("() => navigator.userAgent")
                 context.log.warning(f"ZAP sem resultados. Titulo='{page_title}', UA='{user_agent}'")
-                os.makedirs("data/screenshots", exist_ok=True)
-                await page.screenshot(path=f"data/screenshots/zap_{self.slugify(neighborhood)}_empty.png")
+                os.makedirs("data/diagnostics/screenshots", exist_ok=True)
+                await page.screenshot(path=f"data/diagnostics/screenshots/zap_{self.slugify(neighborhood)}_empty.png")
                 raise RuntimeError(f"ZAP returned no extractable cards for {neighborhood}")
             current_page_match = re.search(r'[?&]page=(\d+)', url)
             current_page = int(current_page_match.group(1)) if current_page_match else 1
@@ -563,8 +564,8 @@ class CrawleeScraper:
                 await page.wait_for_selector("section[class*='olx-adcard']", timeout=15000)
             except Exception as e:
                 context.log.warning(f"Timeout OLX em {neighborhood}: {e}")
-                os.makedirs("data/screenshots", exist_ok=True)
-                await page.screenshot(path=f"data/screenshots/olx_{self.slugify(neighborhood)}_error.png")
+                os.makedirs("data/diagnostics/screenshots", exist_ok=True)
+                await page.screenshot(path=f"data/diagnostics/screenshots/olx_{self.slugify(neighborhood)}_error.png")
                 raise RuntimeError(
                     f"OLX did not render listing cards for {neighborhood}"
                 ) from e
@@ -619,8 +620,8 @@ class CrawleeScraper:
             ]
             rejected_by_location = total_listings - len(listings)
             context.log.info(
-                f"[OLX] {len(listings)} anúncios de Belo Horizonte/{neighborhood}; "
-                f"{rejected_by_location} descartados por localização."
+                f"[OLX] {len(listings)} listings from Belo Horizonte/{neighborhood}; "
+                f"{rejected_by_location} rejected by location."
             )
             current_page_match = re.search(r'[?&]o=(\d+)', url)
             current_page = int(current_page_match.group(1)) if current_page_match else 1
@@ -649,8 +650,8 @@ class CrawleeScraper:
                 )
             except Exception as e:
                 context.log.warning(f"Timeout QuintoAndar em {neighborhood}: {e}")
-                os.makedirs("data/screenshots", exist_ok=True)
-                await page.screenshot(path=f"data/screenshots/quintoandar_{self.slugify(neighborhood)}_error.png")
+                os.makedirs("data/diagnostics/screenshots", exist_ok=True)
+                await page.screenshot(path=f"data/diagnostics/screenshots/quintoandar_{self.slugify(neighborhood)}_error.png")
                 raise RuntimeError(
                     f"QuintoAndar did not render listing cards for {neighborhood}"
                 ) from e
@@ -718,8 +719,8 @@ class CrawleeScraper:
                 ]
                 rejected_by_location = len(listings) - len(matching_listings)
                 context.log.info(
-                    f"[QuintoAndar] {len(matching_listings)} anúncios em {neighborhood}; "
-                    f"{rejected_by_location} descartados por localização."
+                    f"[QuintoAndar] {len(matching_listings)} listings in {neighborhood}; "
+                    f"{rejected_by_location} rejected by location."
                 )
                 should_continue = await store_page(
                     matching_listings, site, neighborhood, current_page, context, rejected_by_location,
@@ -729,7 +730,7 @@ class CrawleeScraper:
 
                 more_button = page.get_by_role("button", name="Ver mais", exact=True)
                 if await more_button.count() != 1:
-                    context.log.info(f"[QuintoAndar] Não há mais resultados para {neighborhood}.")
+                    context.log.info(f"[QuintoAndar] No more results for {neighborhood}.")
                     break
 
                 card_count = len(listings)
@@ -744,7 +745,7 @@ class CrawleeScraper:
                     )
                 except Exception as e:
                     context.log.warning(
-                        f"[QuintoAndar] 'Ver mais' não carregou novos cards em {neighborhood}: {e}"
+                        f"[QuintoAndar] 'Load more' did not load new cards in {neighborhood}: {e}"
                     )
                     break
                 current_page += 1
@@ -766,8 +767,8 @@ class CrawleeScraper:
                 )
             except Exception as e:
                 context.log.warning(f"Timeout Imovelweb em {neighborhood}: {e}")
-                os.makedirs("data/screenshots", exist_ok=True)
-                await page.screenshot(path=f"data/screenshots/imovelweb_{self.slugify(neighborhood)}_error.png")
+                os.makedirs("data/diagnostics/screenshots", exist_ok=True)
+                await page.screenshot(path=f"data/diagnostics/screenshots/imovelweb_{self.slugify(neighborhood)}_error.png")
                 # Do not accept a Cloudflare challenge (or a transient portal
                 # page) as an empty search.  Crawlee retries this request, which
                 # is essential for preserving one result set per neighborhood.
@@ -831,8 +832,8 @@ class CrawleeScraper:
             ]
             rejected_by_location = len(listings) - len(matching_listings)
             context.log.info(
-                f"[Imovelweb] Encontrados {len(matching_listings)} anúncios em {neighborhood}; "
-                f"{rejected_by_location} de outro bairro foram descartados."
+                f"[Imovelweb] Found {len(matching_listings)} listings in {neighborhood}; "
+                f"{rejected_by_location} from another neighborhood were discarded."
             )
             for item in matching_listings:
                 if item['link'] and not item['link'].startswith('http'):
@@ -855,27 +856,34 @@ class CrawleeScraper:
             Request.from_url(url=item["url"], label=item["label"], user_data=item["userData"])
             for item in start_urls
         ]
-        await crawler.run(requests)
-        
-        # Retrieve results
-        results = await dataset.get_data()
-        items = results.items
-        print(f"Scrape completo! Total de anúncios coletados pelo Crawlee: {len(items)}")
-        
-        if items:
-            df = pd.DataFrame(items)
-            # Save CSV locally
-            os.makedirs(os.path.dirname(self.raw_data_path), exist_ok=True)
-            df.to_csv(
-                self.raw_data_path,
-                index=False,
-                sep=';',
-                decimal=',',
-                encoding='utf-8-sig',
-            )
-            print(f"Anúncios salvos em: {self.raw_data_path}")
+        try:
+            await crawler.run(requests)
+
+            # Retrieve results
+            results = await dataset.get_data()
+            items = results.items
+            print(f"Scrape complete. Total listings collected by Crawlee: {len(items)}")
             
-        return items
+            if items and self.raw_data_path:
+                df = pd.DataFrame(items)
+                os.makedirs(os.path.dirname(self.raw_data_path), exist_ok=True)
+                df.to_csv(
+                    self.raw_data_path,
+                    index=False,
+                    sep=';',
+                    decimal=',',
+                    encoding='utf-8-sig',
+                )
+                print(f"Listings saved to: {self.raw_data_path}")
+
+            return items
+        finally:
+            shutil.rmtree(storage_dir, ignore_errors=True)
+            for empty_dir in (os.path.dirname(storage_dir), os.path.dirname(os.path.dirname(storage_dir))):
+                try:
+                    os.rmdir(empty_dir)
+                except OSError:
+                    pass
 
     def run(
         self,
@@ -895,10 +903,3 @@ class CrawleeScraper:
             min_pages_per_bairro,
             min_new_listings_per_page,
         ))
-
-if __name__ == "__main__":
-    # Standard local test block
-    test_bairros = ["Savassi"]
-    scraper = CrawleeScraper()
-    print("Iniciando teste de raspagem modular com Crawlee...")
-    scraper.run(test_bairros, max_pages_per_bairro=1, sites=["vivareal", "zap", "olx", "quintoandar", "imovelweb"])

@@ -39,9 +39,9 @@ def build_cep_lookup(transactions: pd.DataFrame, buildings: pd.DataFrame) -> dic
         ignore_index=True,
     )
     return {
-        "logradouro_numero": _unique_cep_map(references, ["street", "number"]),
-        "logradouro_bairro": _unique_cep_map(references, ["street", "neighborhood"]),
-        "logradouro": _unique_cep_map(references, ["street"]),
+        "street_number": _unique_cep_map(references, ["street", "number"]),
+        "street_neighborhood": _unique_cep_map(references, ["street", "neighborhood"]),
+        "street": _unique_cep_map(references, ["street"]),
     }
 
 
@@ -49,18 +49,18 @@ def infer_listing_cep(listing: pd.Series, lookup: dict[str, dict[tuple[str, ...]
     """Return an existing or uniquely inferred CEP and its audit method."""
     cep = "".join(char for char in str(listing.get("cep", "") or "") if char.isdigit())
     if len(cep) == 8:
-        return cep, "anuncio"
+        return cep, "listing"
     street = normalize_street(listing.get("street", ""))
     number = normalize_number(listing.get("number", ""))
     neighborhood = normalize_neighborhood(listing.get("neighborhood", ""))
     for method, key in (
-        ("logradouro_numero", (street, number)),
-        ("logradouro_bairro", (street, neighborhood)),
-        ("logradouro", (street,)),
+        ("street_number", (street, number)),
+        ("street_neighborhood", (street, neighborhood)),
+        ("street", (street,)),
     ):
         if all(key) and key in lookup[method]:
             return lookup[method][key], method
-    return "", "nao_inferido"
+    return "", "not_inferred"
 
 
 def _choose_by_area(candidates: pd.DataFrame, area: float) -> pd.Series | None:
@@ -85,10 +85,10 @@ def match_building(listing: pd.Series, buildings: pd.DataFrame) -> tuple[pd.Seri
     if cep and number:
         candidates = buildings[(buildings["cep"] == cep) & (buildings["number"] == number)]
         if len(candidates) == 1:
-            return candidates.iloc[0], "confirmado", "cep+numero_unico"
+            return candidates.iloc[0], "confirmed", "cep+unique_number"
         chosen = _choose_by_area(candidates, area)
         if chosen is not None:
-            return chosen, "provavel", "cep+numero_ambiguo_resolvido_por_area"
+            return chosen, "likely", "cep+ambiguous_number_resolved_by_area"
 
     if street and number:
         candidates = buildings[(buildings["street"] == street) & (buildings["number"] == number)]
@@ -98,7 +98,7 @@ def match_building(listing: pd.Series, buildings: pd.DataFrame) -> tuple[pd.Seri
                 candidates = same_neighborhood
         chosen = _choose_by_area(candidates, area)
         if chosen is not None:
-            return chosen, "provavel", "logradouro+numero"
+            return chosen, "likely", "street+number"
 
     if street and neighborhood:
         candidates = buildings[
@@ -106,9 +106,9 @@ def match_building(listing: pd.Series, buildings: pd.DataFrame) -> tuple[pd.Seri
         ]
         compatible = candidates[(candidates["area_min"] <= area) & (candidates["area_max"] >= area)]
         if len(compatible) == 1:
-            return compatible.iloc[0], "provavel", "logradouro+bairro+area"
+            return compatible.iloc[0], "likely", "street+neighborhood+area"
 
-    return None, "sem_match", "dados_insuficientes_ou_sem_correspondencia"
+    return None, "no_match", "insufficient_data_or_no_match"
 
 
 class PatternClassifier:
@@ -138,14 +138,14 @@ class PatternClassifier:
             return prediction.pattern, prediction.confidence, prediction.method
         reference = self.stats.get(neighborhood)
         if not reference:
-            return "P3", 0.40, "heuristica_sem_referencia"
+            return "P3", 0.40, "heuristic_without_reference"
         if price_m2 <= reference["itbi_m2_p30"]:
             pattern = "P3"
         elif price_m2 <= reference["itbi_m2_p80"]:
             pattern = "P4"
         else:
             pattern = "P5" if area >= reference["median_area"] * 0.8 else "P4"
-        return pattern, 0.70, "itbi_heuristica"
+        return pattern, 0.70, "itbi_heuristic"
 
     def classify_many(self, listings: pd.DataFrame) -> list[tuple[str, float, str]] | None:
         if self.model is None:
@@ -164,7 +164,7 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
-        raise DataQualityError("Datasets preparados ausentes: " + ", ".join(missing))
+        raise DataQualityError("Prepared datasets are missing: " + ", ".join(missing))
     transactions = read_csv_auto(required[0])
     stats = read_csv_auto(required[1])
     buildings = read_csv_auto(required[2])
@@ -206,8 +206,8 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         building_year = 0
         if matched is not None and str(matched.get("finish_pattern", "")) in VALID_PATTERNS:
             pattern = str(matched["finish_pattern"])
-            confidence = 1.0 if evidence == "confirmado" else 0.85
-            method = "iptu_deterministico"
+            confidence = 1.0 if evidence == "confirmed" else 0.85
+            method = "iptu_deterministic"
             building_year = int(matched.get("building_year", 0) or 0)
         else:
             if batch_predictions is not None:
@@ -217,7 +217,7 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
                     str(listing["neighborhood"]), str(listing["street"]),
                     float(listing["area_m2"]), float(listing["price_m2"]),
                 )
-            evidence = "estimado"
+            evidence = "estimated"
         neighborhood = str(listing["neighborhood"])
         reference = stats_index.get(neighborhood, {})
         mean_m2 = float(reference.get("itbi_m2_mean", 0) or 0)
@@ -239,15 +239,28 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         discount_pattern_opportunity = pattern_mean_m2 > 0 and discount_pattern_mean >= threshold
         criteria = []
         if discount_neighborhood_opportunity:
-            criteria.append("desconto_bairro")
+            criteria.append("neighborhood_discount")
         if discount_pattern_opportunity:
-            criteria.append("desconto_bairro_padrao")
+            criteria.append("neighborhood_pattern_discount")
         if pattern_arbitrage:
-            criteria.append("arbitragem_padrao")
+            criteria.append("finish_pattern_arbitrage")
         if criteria:
-            opportunity_status = "confirmada" if evidence in {"confirmado", "provavel"} else "estimada"
+            opportunity_status = "confirmed" if evidence in {"confirmed", "likely"} else "estimated"
         else:
-            opportunity_status = "nao"
+            opportunity_status = "not_qualified"
+        parking_review_status = str(listing.get("parking_review_status", "pending_review"))
+        if not criteria:
+            ranking_status = "not_qualified"
+            ranking_priority = 0
+        elif parking_review_status == "approved":
+            ranking_status = "parking_eligible"
+            ranking_priority = 3
+        elif parking_review_status == "rejected":
+            ranking_status = "parking_excluded"
+            ranking_priority = 1
+        else:
+            ranking_status = "parking_pending_review"
+            ranking_priority = 2
         record = listing.to_dict()
         record.update({
             "cep_original": original_cep,
@@ -270,6 +283,8 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             "discount_vs_median": discount_median,
             "opportunity_criteria": ",".join(criteria),
             "opportunity_status": opportunity_status,
+            "ranking_status": ranking_status,
+            "ranking_priority": ranking_priority,
         })
         output.append(record)
     analysis = pd.DataFrame(output)
@@ -290,15 +305,17 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         "source", "source_file", "collected_at", "listing_age_days", "requested_neighborhood",
         "cep", "cep_original", "cep_inference_method", "evidence_level", "match_reason",
         "classification_method", "classification_confidence", "classifier_version",
-        "opportunity_criteria", "opportunity_status", "neighborhood_method", "title", "url",
+        "opportunity_criteria", "opportunity_status", "ranking_status", "ranking_priority",
+        "neighborhood_method", "title", "url",
         "neighborhood", "price", "area_m2", "price_m2", "bedrooms", "bathrooms",
-        "parking_spaces", "condominium", "advertised_iptu", "street", "number",
+        "parking_spaces", "parking_type", "parking_evidence", "parking_confidence",
+        "parking_review_status", "condominium", "advertised_iptu", "street", "number",
         "finish_pattern", "building_year",
     ]
     remaining_columns = [column for column in analysis.columns if column not in leading_columns + metric_columns]
     analysis = analysis[leading_columns + metric_columns + remaining_columns]
     analysis.sort_values(
-        by=["opportunity_status", "discount_vs_mean"], ascending=[True, False], inplace=True
+        by=["ranking_priority", "discount_vs_mean"], ascending=[False, False], inplace=True
     )
     path, manifest = write_dataset(
         analysis,
@@ -323,9 +340,9 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         artifacts=[str(path), str(manifest)],
         counts={
             "listings": len(analysis),
-            "confirmed_opportunities": int((analysis["opportunity_status"] == "confirmada").sum()),
-            "estimated_opportunities": int((analysis["opportunity_status"] == "estimada").sum()),
-            "confirmed_matches": int((analysis["evidence_level"] == "confirmado").sum()),
+            "confirmed_opportunities": int((analysis["opportunity_status"] == "confirmed").sum()),
+            "estimated_opportunities": int((analysis["opportunity_status"] == "estimated").sum()),
+            "confirmed_matches": int((analysis["evidence_level"] == "confirmed").sum()),
         },
         details={
             "classifier": classifier.version,

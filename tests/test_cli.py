@@ -1,4 +1,4 @@
-from imovel_scrapper.cli import build_parser
+from property_scraper.cli import build_parser
 
 
 def test_all_public_commands_are_registered():

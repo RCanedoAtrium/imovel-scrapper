@@ -3,11 +3,11 @@ import json
 
 import pandas as pd
 
-from imovel_scrapper.analysis import analyze
-from imovel_scrapper.config import load_settings
-from imovel_scrapper.processing import prepare_all, prepare_listings
-from imovel_scrapper.reporting import generate_report
-from imovel_scrapper.sources.listings import ListingCollector
+from property_scraper.analysis import analyze
+from property_scraper.config import load_settings
+from property_scraper.processing import prepare_all, prepare_listings
+from property_scraper.reporting import generate_report
+from property_scraper.sources.listings import ListingCollector
 from crawlee_scraper import CrawleeScraper, RAW_LISTING_COLUMNS
 
 
@@ -36,7 +36,7 @@ def _write_sources(root: Path):
         "CEP": "30360250",
     }]).to_csv(iptu_dir / "20260101_regional_centro_sul_cadastro_imobiliario.csv", index=False)
     pd.DataFrame([{
-        "title": "Apartamento à venda em Rua Ptolomeu 130, Anchieta, Belo Horizonte 30360-250",
+        "title": "Apartamento à venda em Rua Ptolomeu 130, Anchieta, Belo Horizonte 30360-250 com 1 vaga livre",
         "price": "R$ 100.000", "area": "60 m²", "link": "https://example.test/1",
         "neighborhood": "ANCHIETA", "site": "Fixture",
     }]).to_csv(listing_dir / "fixture.csv", index=False)
@@ -63,26 +63,31 @@ def test_pipeline_without_network(project):
     assert record["itbi_m2_neighborhood_median"] == 5110
     assert record["itbi_neighborhood_sales_count"] == 12
     assert record["itbi_m2_neighborhood_pattern_median"] == 5050
-    assert list(analysis.columns[:38]) == [
+    assert record["parking_type"] == "independent"
+    assert record["ranking_status"] == "parking_eligible"
+    expected_leading_columns = [
         "source", "source_file", "collected_at", "listing_age_days", "requested_neighborhood",
         "cep", "cep_original", "cep_inference_method", "evidence_level", "match_reason",
         "classification_method", "classification_confidence", "classifier_version",
-        "opportunity_criteria", "opportunity_status", "neighborhood_method", "title", "url",
+        "opportunity_criteria", "opportunity_status", "ranking_status", "ranking_priority",
+        "neighborhood_method", "title", "url",
         "neighborhood", "price", "area_m2", "price_m2", "bedrooms", "bathrooms",
-        "parking_spaces", "condominium", "advertised_iptu", "street", "number",
+        "parking_spaces", "parking_type", "parking_evidence", "parking_confidence",
+        "parking_review_status", "condominium", "advertised_iptu", "street", "number",
         "finish_pattern", "building_year", "itbi_m2_neighborhood_mean",
         "itbi_m2_neighborhood_pattern_mean", "listing_m2_neighborhood_mean",
         "listing_m2_neighborhood_pattern_mean", "itbi_m2_neighborhood_median",
         "itbi_neighborhood_sales_count", "itbi_m2_neighborhood_pattern_median",
     ]
+    assert list(analysis.columns[:len(expected_leading_columns)]) == expected_leading_columns
     assert record["discount_vs_neighborhood_pattern_mean"] < record["discount_vs_neighborhood_mean"]
     assert (root / "data" / "processed" / "analysis.csv").exists()
     report = generate_report(settings, run_id="test")
     report_path = Path(report.artifacts[0])
     assert report_path.exists()
     assert set(pd.ExcelFile(report_path).sheet_names) == {
-        "Oportunidades_Confirmadas", "Oportunidades_Estimadas", "Resumo_Bairros",
-        "Todos_Anuncios", "Qualidade_Dados", "Execucao",
+        "Parking_Eligible", "Parking_Pending", "Parking_Excluded", "Neighborhood_Summary",
+        "All_Listings", "Data_Quality", "Run",
     }
 
 
