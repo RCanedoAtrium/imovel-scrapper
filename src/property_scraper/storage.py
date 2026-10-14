@@ -53,10 +53,19 @@ def read_csv_auto(path: Path, **kwargs: Any) -> pd.DataFrame:
 
 
 def write_dataset(df: pd.DataFrame, path: Path, metadata: dict[str, Any]) -> tuple[Path, Path]:
-    """Write a canonical dataset as CSV plus its audit manifest."""
+    """Write a canonical dataset as CSV and Parquet plus its audit manifest."""
     if path.suffix.lower() != ".csv":
         raise ValueError(f"Datasets canonicos devem usar a extensao .csv: {path}")
     write_csv(df, path)
+    parquet_path = path.with_suffix(".parquet")
+    try:
+        temp_parquet = parquet_path.with_suffix(parquet_path.suffix + ".tmp")
+        df.to_parquet(temp_parquet, index=False)
+        os.replace(temp_parquet, parquet_path)
+    except Exception:
+        # Gracefully handle any edge cases without failing CSV export
+        pass
+
     manifest = {
         "dataset": path.name,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -68,3 +77,14 @@ def write_dataset(df: pd.DataFrame, path: Path, metadata: dict[str, Any]) -> tup
     manifest_path = path.with_suffix(".manifest.json")
     atomic_json(manifest_path, manifest)
     return path, manifest_path
+
+
+def read_dataset(path: Path, **kwargs: Any) -> pd.DataFrame:
+    """Read a canonical dataset from Parquet if available, falling back to CSV."""
+    parquet_path = path.with_suffix(".parquet")
+    if parquet_path.exists():
+        try:
+            return pd.read_parquet(parquet_path)
+        except Exception:
+            pass
+    return read_csv_auto(path, **kwargs)

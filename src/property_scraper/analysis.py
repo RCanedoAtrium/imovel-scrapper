@@ -7,7 +7,7 @@ from .errors import DataQualityError
 from .models import StageResult
 from .normalization import normalize_neighborhood, normalize_number, normalize_street
 from .pattern_model import VALID_PATTERNS, RandomForestPatternModel
-from .storage import read_csv_auto, write_dataset
+from .storage import read_dataset, write_dataset
 
 # Area warnings that need IPTU confirmation before a listing can be ranked.
 DOUBTFUL_AREA_WARNINGS = frozenset({"area_mismatch_warning", "area_total_only"})
@@ -78,15 +78,57 @@ def _choose_by_area(candidates: pd.DataFrame, area: float) -> pd.Series | None:
     return candidates.loc[(midpoint - area).abs().idxmin()]
 
 
-def match_building(listing: pd.Series, buildings: pd.DataFrame) -> tuple[pd.Series | None, str, str]:
+class BuildingIndex:
+    """Pre-indexes buildings for O(1) candidate lookup instead of full DataFrame scans."""
+
+    def __init__(self, buildings: pd.DataFrame):
+        self.buildings = buildings
+        self.by_cep_number: dict[tuple[str, str], list[int]] = {}
+        self.by_street_number: dict[tuple[str, str], list[int]] = {}
+        self.by_street_neighborhood: dict[tuple[str, str], list[int]] = {}
+
+        if not buildings.empty:
+            for idx in range(len(buildings)):
+                c = str(buildings.at[idx, "cep"] or "") if "cep" in buildings.columns else ""
+                n = str(buildings.at[idx, "number"] or "") if "number" in buildings.columns else ""
+                s = str(buildings.at[idx, "street"] or "") if "street" in buildings.columns else ""
+                b = str(buildings.at[idx, "neighborhood"] or "") if "neighborhood" in buildings.columns else ""
+                if c and n:
+                    self.by_cep_number.setdefault((c, n), []).append(idx)
+                if s and n:
+                    self.by_street_number.setdefault((s, n), []).append(idx)
+                if s and b:
+                    self.by_street_neighborhood.setdefault((s, b), []).append(idx)
+
+    def get_by_cep_number(self, cep: str, number: str) -> pd.DataFrame:
+        indices = self.by_cep_number.get((cep, number), [])
+        return self.buildings.iloc[indices] if indices else self.buildings.iloc[0:0]
+
+    def get_by_street_number(self, street: str, number: str) -> pd.DataFrame:
+        indices = self.by_street_number.get((street, number), [])
+        return self.buildings.iloc[indices] if indices else self.buildings.iloc[0:0]
+
+    def get_by_street_neighborhood(self, street: str, neighborhood: str) -> pd.DataFrame:
+        indices = self.by_street_neighborhood.get((street, neighborhood), [])
+        return self.buildings.iloc[indices] if indices else self.buildings.iloc[0:0]
+
+
+def match_building(
+    listing: pd.Series,
+    buildings: pd.DataFrame,
+    building_index: BuildingIndex | None = None,
+) -> tuple[pd.Series | None, str, str]:
     cep = listing.get("cep", "")
     number = listing.get("number", "")
     street = listing.get("street", "")
     neighborhood = listing.get("neighborhood", "")
     area = float(listing.get("area_m2", 0) or 0)
 
+    if building_index is None:
+        building_index = BuildingIndex(buildings)
+
     if cep and number:
-        candidates = buildings[(buildings["cep"] == cep) & (buildings["number"] == number)]
+        candidates = building_index.get_by_cep_number(cep, number)
         if len(candidates) == 1:
             return candidates.iloc[0], "confirmed", "cep+unique_number"
         chosen = _choose_by_area(candidates, area)
@@ -94,8 +136,8 @@ def match_building(listing: pd.Series, buildings: pd.DataFrame) -> tuple[pd.Seri
             return chosen, "likely", "cep+ambiguous_number_resolved_by_area"
 
     if street and number:
-        candidates = buildings[(buildings["street"] == street) & (buildings["number"] == number)]
-        if neighborhood:
+        candidates = building_index.get_by_street_number(street, number)
+        if neighborhood and not candidates.empty:
             same_neighborhood = candidates[candidates["neighborhood"] == neighborhood]
             if not same_neighborhood.empty:
                 candidates = same_neighborhood
@@ -104,12 +146,11 @@ def match_building(listing: pd.Series, buildings: pd.DataFrame) -> tuple[pd.Seri
             return chosen, "likely", "street+number"
 
     if street and neighborhood:
-        candidates = buildings[
-            (buildings["street"] == street) & (buildings["neighborhood"] == neighborhood)
-        ]
-        compatible = candidates[(candidates["area_min"] <= area) & (candidates["area_max"] >= area)]
-        if len(compatible) == 1:
-            return compatible.iloc[0], "likely", "street+neighborhood+area"
+        candidates = building_index.get_by_street_neighborhood(street, neighborhood)
+        if not candidates.empty:
+            compatible = candidates[(candidates["area_min"] <= area) & (candidates["area_max"] >= area)]
+            if len(compatible) == 1:
+                return compatible.iloc[0], "likely", "street+neighborhood+area"
 
     return None, "no_match", "insufficient_data_or_no_match"
 
@@ -159,7 +200,12 @@ class PatternClassifier:
         ]
 
 
-def deduplicate_physical_properties(df: pd.DataFrame) -> pd.DataFrame:
+def deduplicate_physical_properties(
+    df: pd.DataFrame,
+    area_tol: float = 0.06,
+    price_tol: float = 0.08,
+    strict_tol: float = 0.03,
+) -> pd.DataFrame:
     """Group duplicate listings of the same physical unit across brokers and portals.
 
     Election rule:
@@ -207,17 +253,17 @@ def deduplicate_physical_properties(df: pd.DataFrame) -> pd.DataFrame:
                     continue
 
                 max_area = max(area, r_area)
-                if max_area > 0 and abs(area - r_area) / max_area > 0.06:
+                if max_area > 0 and abs(area - r_area) / max_area > area_tol:
                     continue
 
                 max_price = max(price, r_price)
-                if max_price > 0 and abs(price - r_price) / max_price > 0.08:
+                if max_price > 0 and abs(price - r_price) / max_price > price_tol:
                     continue
 
                 if not street and not r_street:
-                    if max_area > 0 and abs(area - r_area) / max_area > 0.03:
+                    if max_area > 0 and abs(area - r_area) / max_area > strict_tol:
                         continue
-                    if max_price > 0 and abs(price - r_price) / max_price > 0.03:
+                    if max_price > 0 and abs(price - r_price) / max_price > strict_tol:
                         continue
 
                 matched_cluster = cluster
@@ -341,15 +387,16 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise DataQualityError("Prepared datasets are missing: " + ", ".join(missing))
-    transactions = read_csv_auto(required[0])
-    stats = read_csv_auto(required[1])
-    buildings = read_csv_auto(required[2])
-    listings = read_csv_auto(required[3])
+    transactions = read_dataset(required[0])
+    stats = read_dataset(required[1])
+    buildings = read_dataset(required[2])
+    listings = read_dataset(required[3])
     for frame in (transactions, buildings):
         frame["street"] = frame["street"].map(normalize_street)
         frame["number"] = frame["number"].map(normalize_number)
         frame["neighborhood"] = frame["neighborhood"].map(normalize_neighborhood)
         frame["cep"] = frame["cep"].fillna("").astype(str).str.replace(r"\D", "", regex=True)
+    building_index = BuildingIndex(buildings)
     cep_lookup = build_cep_lookup(transactions, buildings)
     classifier = PatternClassifier(transactions, stats, classifier_mode or settings.classifier)
     batch_predictions = classifier.classify_many(listings)
@@ -367,6 +414,7 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         .agg(["mean", "median", "count"])
         .to_dict("index")
     )
+    rules = settings.rules
     output: list[dict[str, object]] = []
     for position, (_, listing) in enumerate(listings.iterrows()):
         listing = listing.copy()
@@ -375,7 +423,7 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         original_cep = str(listing.get("cep", "") or "")
         inferred_cep, cep_inference_method = infer_listing_cep(listing, cep_lookup)
         listing["cep"] = inferred_cep
-        matched, evidence, match_reason = match_building(listing, buildings)
+        matched, evidence, match_reason = match_building(listing, buildings, building_index=building_index)
         pattern = ""
         confidence = 0.0
         method = ""
@@ -429,7 +477,9 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         )
         discount_median = (median_m2 - float(listing["price_m2"])) / median_m2 if median_m2 else 0.0
         p3_median = float(p3_medians.get(neighborhood, 0) or 0)
-        pattern_arbitrage = pattern == "P5" and p3_median > 0 and float(listing["price_m2"]) <= p3_median * 1.15
+        pattern_arbitrage = (
+            pattern == "P5" and p3_median > 0 and float(listing["price_m2"]) <= p3_median * rules.pattern_arbitrage_multiplier
+        )
         if pattern_mean_m2 > 0 and mean_m2 > 0:
             conservative_ref_m2 = min(pattern_mean_m2, mean_m2)
         else:
@@ -515,7 +565,12 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         })
         output.append(record)
     raw_analysis = pd.DataFrame(output)
-    analysis = deduplicate_physical_properties(raw_analysis)
+    analysis = deduplicate_physical_properties(
+        raw_analysis,
+        area_tol=rules.dedup_area_tolerance,
+        price_tol=rules.dedup_price_tolerance,
+        strict_tol=rules.dedup_strict_tolerance,
+    )
     analysis["listing_m2_neighborhood_pattern_mean"] = analysis.groupby(
         ["neighborhood", "finish_pattern"]
     )["price_m2"].transform("mean")

@@ -7,13 +7,12 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from crawlee_scraper import RAW_LISTING_COLUMNS, CrawleeScraper
-
 from ..config import Settings
 from ..errors import SourceError
 from ..models import StageResult
 from ..normalization import extract_area_m2, extract_currency, normalize_neighborhood
 from ..storage import read_csv_auto, write_csv
+from .portals import RAW_LISTING_COLUMNS, CrawleeScraper
 
 SUPPORTED_SITES = {"vivareal", "zap", "olx", "quintoandar", "imovelweb"}
 
@@ -78,7 +77,10 @@ class ListingCollector:
                     portal_status[site.lower()] = "retained_from_base"
 
             factory = scraper_factory or CrawleeScraper
-            scraper = factory(raw_data_path=str(combined))
+            try:
+                scraper = factory(raw_data_path=str(combined), diagnostics_dir=self.settings.paths.diagnostics)
+            except TypeError:
+                scraper = factory(raw_data_path=str(combined))
             items = scraper.run(
                 target_neighborhoods,
                 max_pages_per_bairro=pages,

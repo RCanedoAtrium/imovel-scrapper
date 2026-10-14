@@ -107,15 +107,20 @@ LARGE_UNIT_KEYWORDS = ("COBERTURA", "PRIVATIVA", "AREA PRIVATIVA", "DUPLEX", "TR
 _BEDROOMS_IN_TEXT = re.compile(r"(\d+)\s*(?:quartos?|dormitorios?)\b", re.I)
 
 
-def validate_typology_coherence(title: str, area_m2: float, bedrooms: float = 0.0) -> tuple[bool, str]:
+def validate_typology_coherence(
+    title: str,
+    area_m2: float,
+    bedrooms: float = 0.0,
+    area_limit: float = TYPOLOGY_AREA_LIMIT_M2,
+) -> tuple[bool, str]:
     """Validates whether an apartment area is coherent with its title description.
 
-    Conventional apartments (2 to 4 bedrooms) > 300 m² without keywords
+    Conventional apartments (2 to 4 bedrooms) > area_limit m² without keywords
     indicating coverage, private area, or duplex/garden are flagged to avoid
     land/total-area distortions. When the bedroom count is unknown, the unit is
     treated as conventional so the check stays conservative.
     """
-    if area_m2 <= TYPOLOGY_AREA_LIMIT_M2:
+    if area_m2 <= area_limit:
         return True, ""
     normalized_title = strip_accents(str(title or "")).upper()
     rooms = int(bedrooms or 0)
@@ -130,12 +135,18 @@ def validate_typology_coherence(title: str, area_m2: float, bedrooms: float = 0.
     return False, "area_mismatch_warning"
 
 
-def detect_area_warning(area_text: Any, title: str, area_m2: float, bedrooms: float = 0.0) -> str:
+def detect_area_warning(
+    area_text: Any,
+    title: str,
+    area_m2: float,
+    bedrooms: float = 0.0,
+    area_limit: float = TYPOLOGY_AREA_LIMIT_M2,
+) -> str:
     """Returns an area warning tag if area is suspicious, unverified, or mismatched."""
     text = str(area_text or "")
     if re.search(r"m[²2]\s*(?:tot|total|terreno)", text, re.I) and not re.search(r"m[²2]\s*(?:[úu]til|privativ)", text, re.I):
         return "area_total_only"
-    is_coherent, warning = validate_typology_coherence(title, area_m2, bedrooms)
+    is_coherent, warning = validate_typology_coherence(title, area_m2, bedrooms, area_limit=area_limit)
     if not is_coherent:
         return warning
     return ""

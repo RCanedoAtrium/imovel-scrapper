@@ -48,6 +48,19 @@ class Paths:
 
 
 @dataclass(frozen=True)
+class RulesSettings:
+    min_valid_price: float = 20_000.0
+    min_valid_area_m2: float = 10.0
+    title_area_override_ratio: float = 1.35
+    max_publication_age_days: int = 180
+    typology_area_limit_m2: float = 300.0
+    dedup_area_tolerance: float = 0.06
+    dedup_price_tolerance: float = 0.08
+    dedup_strict_tolerance: float = 0.03
+    pattern_arbitrage_multiplier: float = 1.15
+
+
+@dataclass(frozen=True)
 class Settings:
     paths: Paths
     neighborhoods: list[str] = field(default_factory=lambda: list(DEFAULT_NEIGHBORHOODS))
@@ -67,6 +80,7 @@ class Settings:
     iptu_dataset: str = "cadastro-imobiliario-regional-centro-sul"
     itbi_dataset: str = "itbi-relatorios"
     excluded_regions: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDED_REGIONS))
+    rules: RulesSettings = field(default_factory=RulesSettings)
 
 
 def load_settings(config_path: str | Path = "config.json") -> Settings:
@@ -89,6 +103,18 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         raise PipelineError("A paginacao exige 1 <= min_pages_per_neighborhood <= pages_per_neighborhood")
     if min_new < 1:
         raise PipelineError("min_new_listings_per_page deve ser maior que zero")
+    rules_raw = raw.get("rules", {})
+    rules = RulesSettings(
+        min_valid_price=float(rules_raw.get("min_valid_price", 20_000.0)),
+        min_valid_area_m2=float(rules_raw.get("min_valid_area_m2", 10.0)),
+        title_area_override_ratio=float(rules_raw.get("title_area_override_ratio", 1.35)),
+        max_publication_age_days=int(rules_raw.get("max_publication_age_days", 180)),
+        typology_area_limit_m2=float(rules_raw.get("typology_area_limit_m2", 300.0)),
+        dedup_area_tolerance=float(rules_raw.get("dedup_area_tolerance", 0.06)),
+        dedup_price_tolerance=float(rules_raw.get("dedup_price_tolerance", 0.08)),
+        dedup_strict_tolerance=float(rules_raw.get("dedup_strict_tolerance", 0.03)),
+        pattern_arbitrage_multiplier=float(rules_raw.get("pattern_arbitrage_multiplier", 1.15)),
+    )
     settings = Settings(
         paths=Paths.from_root(root),
         neighborhoods=raw.get("neighborhoods", DEFAULT_NEIGHBORHOODS),
@@ -108,6 +134,7 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         iptu_dataset=str(pbh.get("iptu_dataset", "cadastro-imobiliario-regional-centro-sul")),
         itbi_dataset=str(pbh.get("itbi_dataset", "itbi-relatorios")),
         excluded_regions=list(raw.get("excluded_regions", DEFAULT_EXCLUDED_REGIONS)),
+        rules=rules,
     )
     settings.paths.ensure()
     return settings

@@ -7,11 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from crawlee_scraper import RAW_LISTING_COLUMNS, CrawleeScraper
-
 from .config import Settings
 from .errors import PipelineError
 from .models import StageResult
+from .sources.portals import RAW_LISTING_COLUMNS, CrawleeScraper
 
 REQUIRED_CARD_FIELDS = [field for field in RAW_LISTING_COLUMNS if field not in {"number", "location"}]
 

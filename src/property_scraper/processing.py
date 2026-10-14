@@ -91,7 +91,9 @@ def prepare_itbi(settings: Settings) -> tuple[pd.DataFrame, pd.DataFrame, dict[s
     raw["base_price"] = raw["VALOR BASE CALCULO"].map(clean_numeric)
     raw["transaction_price"] = raw[["declared_price", "base_price"]].max(axis=1)
     raw["neighborhood"] = raw["BAIRRO"].map(normalize_neighborhood)
-    raw = raw[(raw["transaction_price"] > 20_000) & (raw["area_m2"] > 10) & (raw["neighborhood"] != "")].copy()
+    min_price = settings.rules.min_valid_price
+    min_area = settings.rules.min_valid_area_m2
+    raw = raw[(raw["transaction_price"] > min_price) & (raw["area_m2"] > min_area) & (raw["neighborhood"] != "")].copy()
     raw["price_m2"] = raw["transaction_price"] / raw["area_m2"]
     addresses = raw.get("ENDERECO", pd.Series("", index=raw.index)).map(_parse_itbi_address)
     raw["street"] = [value[0] for value in addresses]
@@ -168,11 +170,24 @@ def prepare_iptu(settings: Settings, cep_map: dict[str, str], year_map: dict[tup
     return pd.DataFrame(records)
 
 
-def _canonical_url(value: object) -> str:
+PORTAL_DOMAINS = {
+    "vivareal": "https://www.vivareal.com.br",
+    "zap": "https://www.zapimoveis.com.br",
+    "zapimoveis": "https://www.zapimoveis.com.br",
+    "olx": "https://www.olx.com.br",
+    "quintoandar": "https://www.quintoandar.com.br",
+    "imovelweb": "https://www.imovelweb.com.br",
+}
+
+
+def _canonical_url(value: object, site: str = "") -> str:
     if not isinstance(value, str) or not value:
         return ""
     if not value.startswith("http"):
-        value = "https://www.vivareal.com.br" + value
+        clean_site = re.sub(r"[^a-z]", "", str(site).lower())
+        domain = PORTAL_DOMAINS.get(clean_site, "https://www.vivareal.com.br")
+        prefix = "" if value.startswith("/") else "/"
+        value = f"{domain}{prefix}{value}"
     parts = urlsplit(value)
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), "", ""))
 
@@ -197,6 +212,7 @@ def prepare_listings(
     if not run_dirs:
         raise DataQualityError(f"No listing CSV files found in {listing_root}")
 
+    rules = settings.rules
     records: list[dict[str, object]] = []
     now_utc = now if now is not None else datetime.now(timezone.utc)
     candidates = sorted(
@@ -204,6 +220,10 @@ def prepare_listings(
         key=len,
         reverse=True,
     )
+    candidate_patterns = [
+        (candidate, re.compile(rf"(?<!\w){re.escape(candidate)}(?!\w)"))
+        for candidate in candidates
+    ]
     target_neighborhoods = {normalize_neighborhood(value) for value in settings.neighborhoods}
     excluded_regions = [
         region for region in settings.excluded_regions
@@ -240,7 +260,7 @@ def prepare_listings(
                 if native_pub_date:
                     try:
                         pub_dt = datetime.fromisoformat(str(native_pub_date).replace("Z", "+00:00"))
-                        if (now_utc - pub_dt).days > 180:
+                        if (now_utc - pub_dt).days > rules.max_publication_age_days:
                             continue
                     except ValueError:
                         pass
@@ -260,16 +280,19 @@ def prepare_listings(
                 price = extract_currency(price_value)
                 area = extract_area_m2(area_value)
                 title_area = extract_area_m2(title)
-                if title_area > 10 and (area <= 10 or max(area, title_area) / min(area, title_area) > 1.35):
+                if title_area > rules.min_valid_area_m2 and (
+                    area <= rules.min_valid_area_m2 or max(area, title_area) / min(area, title_area) > rules.title_area_override_ratio
+                ):
                     area = title_area
-                if price <= 20_000 or area <= 10:
+                if price <= rules.min_valid_price or area <= rules.min_valid_area_m2:
                     continue
                 neighborhood_value = extract_nested(source, [
                     "neighborhood", "address.neighborhood", "listing.address.neighborhood", "listing.address.bairro", "bairro",
                 ])
                 if isinstance(neighborhood_value, dict):
                     neighborhood_value = neighborhood_value.get("name", neighborhood_value.get("neighborhood", ""))
-                link = _canonical_url(extract_nested(source, ["url", "link", "listing.url", "listing.link"]))
+                source_site = str(extract_nested(source, ["site", "source"]) or path.stem)
+                link = _canonical_url(extract_nested(source, ["url", "link", "listing.url", "listing.link"]), site=source_site)
                 parsed_street, parsed_number, parsed_cep = parse_listing_address(title)
                 direct_street = extract_nested(source, ["street", "address.street", "listing.address.street"])
                 street = normalize_street(direct_street) if direct_street else parsed_street
@@ -283,18 +306,17 @@ def prepare_listings(
                 condo_match = re.search(r"Cond\.?\s*R\$\s*([\d.]+)", str(price_value), re.I)
                 iptu_match = re.search(r"IPTU\s*R\$\s*([\d.]+)", str(price_value), re.I)
                 bedrooms = clean_numeric(extract_nested(source, ["bedrooms", "listing.bedrooms"])) or detail(r"(\d+)\s*(?:dormitorio|dormitório|quarto)")
-                area_warning = detect_area_warning(area_value, title, area, bedrooms)
+                area_warning = detect_area_warning(area_value, title, area, bedrooms, area_limit=rules.typology_area_limit_m2)
                 requested_neighborhood = normalize_neighborhood(neighborhood_value)
                 location_text = str(extract_nested(source, ["location", "address", "listing.address"]) or "")
                 if find_excluded_region(f"{location_text} {title} {link}", excluded_regions):
                     continue
                 evidence_text = normalize_neighborhood(f"{location_text} {title} {link}")
-                detected = [
-                    candidate
-                    for candidate in candidates
-                    if re.search(rf"(?<!\w){re.escape(candidate)}(?!\w)", evidence_text)
-                ]
-                detected_neighborhood = detected[0] if detected else ""
+                detected_neighborhood = ""
+                for candidate, pattern in candidate_patterns:
+                    if pattern.search(evidence_text):
+                        detected_neighborhood = candidate
+                        break
                 if detected_neighborhood and detected_neighborhood not in target_neighborhoods:
                     continue
                 final_neighborhood = detected_neighborhood or requested_neighborhood

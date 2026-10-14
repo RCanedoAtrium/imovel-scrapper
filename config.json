@@ -31,5 +31,16 @@
     "api_base_url": "https://dados.pbh.gov.br/api/3/action",
     "iptu_dataset": "cadastro-imobiliario-regional-centro-sul",
     "itbi_dataset": "itbi-relatorios"
+  },
+  "rules": {
+    "min_valid_price": 20000.0,
+    "min_valid_area_m2": 10.0,
+    "title_area_override_ratio": 1.35,
+    "max_publication_age_days": 180,
+    "typology_area_limit_m2": 300.0,
+    "dedup_area_tolerance": 0.06,
+    "dedup_price_tolerance": 0.08,
+    "dedup_strict_tolerance": 0.03,
+    "pattern_arbitrage_multiplier": 1.15
   }
 }
