@@ -13,7 +13,6 @@ from .config import Settings
 from .errors import PipelineError
 from .models import StageResult
 
-
 REQUIRED_CARD_FIELDS = [field for field in RAW_LISTING_COLUMNS if field not in {"number", "location"}]
 
 

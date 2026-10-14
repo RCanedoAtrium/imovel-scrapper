@@ -9,7 +9,6 @@ from typing import Any
 
 import pandas as pd
 
-
 # CSVs are intended to be opened directly in Brazilian Excel installations.
 # The BOM makes UTF-8 recognizable by Excel; semicolon and decimal comma avoid
 # locale-dependent column and number parsing.
@@ -46,7 +45,8 @@ def write_csv(df: pd.DataFrame, path: Path, *, index: bool = False) -> Path:
 
 def read_csv_auto(path: Path, **kwargs: Any) -> pd.DataFrame:
     """Read both current Excel-compatible CSVs and legacy comma-separated runs."""
-    first_line = path.open("r", encoding="utf-8-sig", errors="replace").readline()
+    with path.open("r", encoding="utf-8-sig", errors="replace") as f:
+        first_line = f.readline()
     separator = ";" if first_line.count(";") > first_line.count(",") else ","
     kwargs.setdefault("decimal", "," if separator == ";" else ".")
     return pd.read_csv(path, sep=separator, encoding="utf-8-sig", **kwargs)

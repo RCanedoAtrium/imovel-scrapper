@@ -4,18 +4,16 @@ import json
 import re
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pandas as pd
 
-from crawlee_scraper import RAW_LISTING_COLUMNS
+from crawlee_scraper import RAW_LISTING_COLUMNS, CrawleeScraper
 
 from ..config import Settings
 from ..errors import SourceError
 from ..models import StageResult
 from ..normalization import extract_area_m2, extract_currency, normalize_neighborhood
 from ..storage import read_csv_auto, write_csv
-
 
 SUPPORTED_SITES = {"vivareal", "zap", "olx", "quintoandar", "imovelweb"}
 
@@ -34,9 +32,8 @@ class ListingCollector:
         max_price: float | None = None,
         neighborhoods: list[str] | None = None,
         base_run_id: str | None = None,
+        scraper_factory: type | None = None,
     ) -> StageResult:
-        from crawlee_scraper import CrawleeScraper
-
         chosen = [site.lower() for site in (sites or self.settings.sites)]
         invalid = sorted(set(chosen).difference(SUPPORTED_SITES))
         if invalid:
@@ -57,7 +54,10 @@ class ListingCollector:
         }
         artifacts: list[str] = []
         counts: dict[str, int] = {}
+        portal_status: dict[str, str] = {}
         failures: list[str] = []
+        rejected_by_price = 0
+        scraper_stats: list[dict] = []
 
         combined = run_dir / "_combined.csv"
         try:
@@ -75,8 +75,10 @@ class ListingCollector:
                     shutil.copy2(previous, output)
                     artifacts.append(str(output))
                     counts[site.lower()] = len(read_csv_auto(previous))
+                    portal_status[site.lower()] = "retained_from_base"
 
-            scraper = CrawleeScraper(raw_data_path=str(combined))
+            factory = scraper_factory or CrawleeScraper
+            scraper = factory(raw_data_path=str(combined))
             items = scraper.run(
                 target_neighborhoods,
                 max_pages_per_bairro=pages,
@@ -85,14 +87,27 @@ class ListingCollector:
                 sites=chosen,
                 price_filters=filters,
             )
+            scraper_stats = getattr(scraper, "pagination_stats", [])
             contract_items = [item for item in (items or []) if self._is_valid_item(item)]
-            rejected_by_price = 0
             for site in chosen:
                 portal_items = [
                     item for item in contract_items if self._canonical_site(item.get("site")) == site
                 ]
                 if not portal_items:
-                    failures.append(f"{site}: no valid listings returned")
+                    if base_dir is not None and (base_dir / f"{site}.csv").exists():
+                        previous = base_dir / f"{site}.csv"
+                        output = run_dir / f"{site}.csv"
+                        shutil.copy2(previous, output)
+                        artifacts.append(str(output))
+                        carried_count = len(read_csv_auto(previous))
+                        counts[site] = carried_count
+                        portal_status[site] = "carried_over_no_new_listings"
+                        failures.append(
+                            f"{site}: no valid listings returned; carried over {carried_count} listings from previous run"
+                        )
+                    else:
+                        portal_status[site] = "failed_no_listings"
+                        failures.append(f"{site}: no valid listings returned")
                     continue
                 site_items = [item for item in portal_items if self._matches_price_filter(item, filters)]
                 rejected_by_price += sum(
@@ -118,6 +133,7 @@ class ListingCollector:
                 write_csv(merged, output)
                 artifacts.append(str(output))
                 counts[site] = len(merged)
+                portal_status[site] = "success"
             pagination_path = run_dir / "pagination.json"
             previous_pagination = []
             if base_dir is not None:
@@ -125,27 +141,52 @@ class ListingCollector:
                 if previous_pagination_path.exists():
                     previous_pagination = json.loads(previous_pagination_path.read_text(encoding="utf-8"))
             pagination_path.write_text(
-                json.dumps([*previous_pagination, *scraper.pagination_stats], ensure_ascii=False, indent=2),
+                json.dumps([*previous_pagination, *scraper_stats], ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             artifacts.append(str(pagination_path))
         except Exception as exc:
             failures.append(f"crawler: {exc}")
+            for site in chosen:
+                if site not in portal_status:
+                    if base_dir is not None and (base_dir / f"{site}.csv").exists():
+                        previous = base_dir / f"{site}.csv"
+                        output = run_dir / f"{site}.csv"
+                        shutil.copy2(previous, output)
+                        artifacts.append(str(output))
+                        carried_count = len(read_csv_auto(previous))
+                        counts[site] = carried_count
+                        portal_status[site] = "carried_over_on_crawler_error"
+                        failures.append(
+                            f"{site}: crawler error; carried over {carried_count} listings from previous run"
+                        )
+                    else:
+                        portal_status[site] = "failed"
         finally:
             combined.unlink(missing_ok=True)
 
+        total_listings = sum(counts.values())
+        successful_portals = [site for site, status in portal_status.items() if status == "success"]
+
         if failures:
             diagnostic = self.settings.paths.diagnostics / f"scrape_{run_id}.txt"
+            diagnostic.parent.mkdir(parents=True, exist_ok=True)
             diagnostic.write_text("\n".join(failures), encoding="utf-8")
+
+        # Discard only if no portal succeeded and no listings could be produced or carried over
+        if not successful_portals and total_listings == 0:
             shutil.rmtree(run_dir, ignore_errors=True)
-            raise SourceError("A selected portal failed; collection discarded. " + " | ".join(failures))
+            raise SourceError("All selected portals failed; collection discarded. " + " | ".join(failures))
 
         latest = self.settings.paths.listings / "latest.txt"
         latest.write_text(run_id, encoding="utf-8")
+        status = "warning" if failures else "success"
         return StageResult(
             stage="scrape",
+            status=status,
             artifacts=artifacts,
-            counts={"portals": len(chosen), "listings": sum(counts.values()), **counts},
+            counts={"portals": len(chosen), "listings": total_listings, **counts},
+            warnings=failures,
             details={
                 "run_id": run_id,
                 "base_run_id": base_run_id,
@@ -153,12 +194,14 @@ class ListingCollector:
                 "pages_per_neighborhood": pages,
                 "min_pages_per_neighborhood": min(self.settings.min_pages_per_neighborhood, pages),
                 "min_new_listings_per_page": self.settings.min_new_listings_per_page,
-                "pages_crawled": len(scraper.pagination_stats),
+                "pages_crawled": len(scraper_stats),
                 "queries_crawled": len({
-                    (row["site"], row["neighborhood"]) for row in scraper.pagination_stats
+                    (row["site"], row["neighborhood"]) for row in scraper_stats
                 }),
                 "max_price": ceiling,
                 "rejected_by_price": rejected_by_price,
+                "portal_status": portal_status,
+                "failures": failures,
             },
         )
 

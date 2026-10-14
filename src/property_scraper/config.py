@@ -6,7 +6,6 @@ from pathlib import Path
 
 from .errors import PipelineError
 
-
 DEFAULT_NEIGHBORHOODS = [
     "BELVEDERE", "SAVASSI", "SANTO AGOSTINHO", "CRUZEIRO", "SAO BENTO",
     "LOURDES", "FUNCIONARIOS", "ANCHIETA", "BOA VIAGEM", "SANTA LUCIA", "CARMO", "SION", "SERRA",

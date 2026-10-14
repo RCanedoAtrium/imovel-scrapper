@@ -5,7 +5,10 @@ import pandas as pd
 
 from property_scraper.analysis import analyze
 from property_scraper.config import load_settings
-from property_scraper.normalization import find_excluded_region, validate_typology_coherence
+from property_scraper.normalization import (
+    find_excluded_region,
+    validate_typology_coherence,
+)
 from property_scraper.processing import prepare_all, prepare_listings
 
 ADDRESS_TITLE = "Apartamento à venda em Rua Ptolomeu 130, Anchieta, Belo Horizonte 30360-250"

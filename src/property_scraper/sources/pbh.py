@@ -16,7 +16,6 @@ from ..models import SourceArtifact, StageResult
 from ..normalization import normalize_column_name
 from ..storage import atomic_json, sha256_file
 
-
 MONTHS = {
     "janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3, "abril": 4,
     "maio": 5, "junho": 6, "julho": 7, "agosto": 8, "setembro": 9,
@@ -206,7 +205,8 @@ def select_itbi_resources(resources: list[dict[str, Any]], start: str) -> dict[s
 
 def validate_csv_schema(path: Path, required: set[str]) -> list[str]:
     errors: list[Exception] = []
-    first_line = path.open("r", encoding="utf-8-sig", errors="replace").readline()
+    with path.open("r", encoding="utf-8-sig", errors="replace") as f:
+        first_line = f.readline()
     separator = ";" if first_line.count(";") > first_line.count(",") else ","
     for encoding in ("utf-8-sig", "latin1"):
         try:

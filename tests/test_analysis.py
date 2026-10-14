@@ -1,6 +1,10 @@
 import pandas as pd
 
-from property_scraper.analysis import build_cep_lookup, infer_listing_cep, match_building
+from property_scraper.analysis import (
+    build_cep_lookup,
+    infer_listing_cep,
+    match_building,
+)
 
 
 def test_matching_evidence_levels():

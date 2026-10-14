@@ -10,6 +10,5 @@ if str(SRC) not in sys.path:
 
 from property_scraper.cli import main
 
-
 if __name__ == "__main__":
     main()

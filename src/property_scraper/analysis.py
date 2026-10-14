@@ -6,7 +6,7 @@ from .config import Settings
 from .errors import DataQualityError
 from .models import StageResult
 from .normalization import normalize_neighborhood, normalize_number, normalize_street
-from .pattern_model import RandomForestPatternModel, VALID_PATTERNS
+from .pattern_model import VALID_PATTERNS, RandomForestPatternModel
 from .storage import read_csv_auto, write_dataset
 
 # Area warnings that need IPTU confirmation before a listing can be ranked.
@@ -422,7 +422,6 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         pattern_reference = pattern_stats.get((neighborhood, pattern), {})
         pattern_mean_m2 = float(pattern_reference.get("mean", 0) or 0)
         pattern_median_m2 = float(pattern_reference.get("median", 0) or 0)
-        pattern_sales_count = int(pattern_reference.get("count", 0) or 0)
         discount_mean = (mean_m2 - float(listing["price_m2"])) / mean_m2 if mean_m2 else 0.0
         discount_pattern_mean = (
             (pattern_mean_m2 - float(listing["price_m2"])) / pattern_mean_m2

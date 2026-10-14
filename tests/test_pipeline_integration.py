@@ -1,15 +1,15 @@
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
+from crawlee_scraper import RAW_LISTING_COLUMNS, CrawleeScraper
 from property_scraper.analysis import analyze
 from property_scraper.config import load_settings
 from property_scraper.processing import prepare_all, prepare_listings
 from property_scraper.reporting import generate_report
 from property_scraper.sources.listings import ListingCollector
-from crawlee_scraper import CrawleeScraper, RAW_LISTING_COLUMNS
 
 
 def _write_sources(root: Path):
@@ -87,10 +87,11 @@ def test_pipeline_without_network(project):
     report = generate_report(settings, run_id="test")
     report_path = Path(report.artifacts[0])
     assert report_path.exists()
-    assert set(pd.ExcelFile(report_path).sheet_names) == {
-        "Parking_Eligible", "Parking_Pending", "Parking_Excluded", "Neighborhood_Summary",
-        "All_Listings", "Data_Quality", "Run",
-    }
+    with pd.ExcelFile(report_path) as xls:
+        assert set(xls.sheet_names) == {
+            "Parking_Eligible", "Parking_Pending", "Parking_Excluded", "Neighborhood_Summary",
+            "All_Listings", "Data_Quality", "Run",
+        }
 
 
 def test_listing_contract():

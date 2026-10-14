@@ -1,10 +1,11 @@
+import asyncio
 import os
 import re
-import asyncio
 import shutil
 import unicodedata
 import urllib.parse
 import uuid
+
 import pandas as pd
 from crawlee import ConcurrencySettings, Request
 from crawlee.configuration import Configuration
@@ -95,9 +96,192 @@ const cardMetadata = (card, options = {}) => {
 };
 """
 
+GRUPO_OLX_CARD_SCRIPT = CARD_METADATA_HELPERS + r"""
+() => {
+    const cards = document.querySelectorAll('a.olx-core-surface, .group\\/card, a[class*="olx-core-surface"]');
+    const results = [];
+    cards.forEach(card => {
+        const href = card.href || '';
+        const addrEl = card.querySelector('[data-cy="rp-cardProperty-location-txt"]');
+        const address = addrEl ? addrEl.textContent.trim() : '';
+        const cardTitle = card.getAttribute('title') || '';
+        const priceEl = card.querySelector('[data-cy="rp-cardProperty-price-txt"]');
+        const price = priceEl ? priceEl.textContent.trim() : '';
+        const areaEl = card.querySelector('[data-cy="rp-cardProperty-propertyArea-txt"]');
+        const metadata = cardMetadata(card, {
+            streetSelectors: ['[data-cy="rp-cardProperty-address-txt"]', '[data-cy*="address"]'],
+            areaSelectors: ['[data-cy="rp-cardProperty-propertyArea-txt"]'],
+            bedroomSelectors: ['[data-cy*="bedroom"]', '[data-cy*="dormitory"]'],
+            bathroomSelectors: ['[data-cy*="bathroom"]'],
+            parkingSelectors: ['[data-cy*="garage"]', '[data-cy*="parking"]'],
+            condominiumSelectors: ['[data-cy*="condominium"]'],
+            iptuSelectors: ['[data-cy*="iptu"]'],
+        });
+        const area = metadata.area || (areaEl ? areaEl.textContent.trim() : '');
+        if (href && (price || area)) {
+            results.push({
+                title: cardTitle || address,
+                price: price,
+                area: area,
+                ...metadata,
+                link: href
+            });
+        }
+    });
+    return results;
+}
+"""
+VIVAREAL_CARD_SCRIPT = GRUPO_OLX_CARD_SCRIPT
+ZAP_CARD_SCRIPT = GRUPO_OLX_CARD_SCRIPT
+
+OLX_CARD_SCRIPT = CARD_METADATA_HELPERS + r"""
+() => {
+    const cards = document.querySelectorAll('section[class*="olx-adcard"]');
+    const results = [];
+    cards.forEach(card => {
+        const linkEl = card.querySelector('a[data-testid="adcard-link"].olx-adcard__link');
+        const href = linkEl ? linkEl.href : '';
+        const titleEl = card.querySelector('h2.olx-adcard__title');
+        const title = titleEl ? titleEl.textContent.trim() : '';
+        const priceEl = card.querySelector('h3.olx-adcard__price');
+        const price = priceEl ? priceEl.textContent.trim() : '';
+        const details = Array.from(card.querySelectorAll('div[class*="olx-adcard__detail"]'));
+        const areaEl = details.find(d => d.textContent.includes('m²'));
+        const area = areaEl ? areaEl.textContent.trim() : '';
+        const locEl = card.querySelector('p.olx-adcard__location');
+        const location = locEl ? locEl.textContent.trim() : '';
+        const metadata = cardMetadata(card, {
+            streetSelectors: [],
+            areaSelectors: ['[aria-label*="metros quadrados" i]'],
+            bedroomSelectors: ['[aria-label*="quarto" i]', '[class*="bedroom"]'],
+            bathroomSelectors: ['[aria-label*="banheiro" i]', '[class*="bathroom"]'],
+            parkingSelectors: ['[aria-label*="vaga" i]', '[class*="parking"]'],
+            condominiumSelectors: ['[class*="condominium"]'],
+            iptuSelectors: ['[class*="iptu"]'],
+        });
+        if (href && !href.endsWith('#') && (price || area)) {
+            results.push({
+                title: title || location,
+                location: location,
+                price: price,
+                area: area,
+                ...metadata,
+                link: href
+            });
+        }
+    });
+    return results;
+}
+"""
+
+QUINTOANDAR_CARD_SCRIPT = CARD_METADATA_HELPERS + r"""
+() => {
+    const cards = document.querySelectorAll('div[data-testid="house-card-container"] a[href*="/imovel/"]');
+    const results = [];
+    cards.forEach(card => {
+        const href = card.href || '';
+        const lines = (card.innerText || '').split('\n').map(value => value.trim()).filter(Boolean);
+        const priceIndex = lines.findIndex(value => /^R\$\s*/.test(value));
+        const title = priceIndex > 0
+            ? lines.slice(0, priceIndex).filter(value => !/^(Exclusivo|Anúncio novo)$/i.test(value)).join(' ')
+            : (card.getAttribute('title') || '');
+        const price = priceIndex >= 0 ? lines[priceIndex] : '';
+        const costLine = lines.slice(priceIndex + 1).find(
+            value => /condo\.?|condom[ií]nio/i.test(value)
+        ) || '';
+        const condominiumMatch = costLine.match(
+            /(R\$\s*[\d.]+(?:,\d{1,2})?)\s*condo\.?|condom[ií]nio/i
+        );
+        const amenities = lines.find(value => /\d+\s*m[²2]/i.test(value)) || '';
+        const location = lines.find(value => /·\s*Belo Horizonte/i.test(value)) || '';
+        const address = location.split(/\s*,\s*[^,]+?\s*·/)[0].trim();
+        const addressParts = address.match(/^(.*?\D)(?:\s*,?\s+)(\d{1,5}[A-Za-z]?)$/);
+        const area = (amenities.match(/\d+(?:[.,]\d+)?\s*m[²2]/i) || [''])[0];
+        const metadata = cardMetadata(card, {
+            streetSelectors: [],
+            areaSelectors: [],
+            bedroomSelectors: ['[aria-label*="quarto" i]', '[data-testid*="bedroom"]'],
+            bathroomSelectors: ['[aria-label*="banheiro" i]', '[data-testid*="bathroom"]'],
+            parkingSelectors: ['[aria-label*="vaga" i]', '[data-testid*="parking"]'],
+            condominiumSelectors: ['[class*="condominium"]'],
+            iptuSelectors: ['[class*="iptu"]'],
+        });
+        if (href && (price || area)) {
+            results.push({
+                title: title,
+                price: price,
+                area: metadata.area || area,
+                location: location,
+                ...metadata,
+                street: addressParts ? addressParts[1].trim() : address,
+                number: addressParts ? addressParts[2] : '',
+                condominium: condominiumMatch ? condominiumMatch[1] : metadata.condominium,
+                link: href
+            });
+        }
+    });
+    return results;
+}
+"""
+
+IMOVELWEB_CARD_SCRIPT = CARD_METADATA_HELPERS + r"""
+() => {
+    const cards = document.querySelectorAll('div[class*="postingCardLayout-module__posting-card-container"]');
+    const results = [];
+    cards.forEach(card => {
+        const linkEl = card.querySelector('h2[class*="posting-description"] a');
+        const href = linkEl ? linkEl.href : '';
+        const title = linkEl ? linkEl.textContent.trim() : '';
+        const priceEl = card.querySelector('[data-qa="POSTING_CARD_PRICE"]');
+        const price = priceEl ? priceEl.textContent.trim() : '';
+        const featuresEl = card.querySelector('[data-qa="POSTING_CARD_FEATURES"]');
+        let area = '';
+        if (featuresEl) {
+            const spans = Array.from(featuresEl.querySelectorAll('span')).map(readText);
+            const utilSpan = spans.find(s => /m[²2]\s*(?:[úu]til|privativ)/i.test(s));
+            const cleanSpan = spans.find(s => /m[²2]/i.test(s) && !/tot|terreno/i.test(s));
+            const anySpan = spans.find(s => /m[²2]/i.test(s));
+            area = utilSpan || cleanSpan || anySpan || '';
+        }
+        const locationEl = card.querySelector('[data-qa="POSTING_CARD_LOCATION"]');
+        const location = locationEl ? locationEl.textContent.trim() : '';
+        const addressCandidates = Array.from(
+            card.querySelectorAll('[data-qa*="ADDRESS"], [class*="address" i], strong, b')
+        ).map(readText);
+        const address = addressCandidates.find(
+            value => /^(?:rua|r|avenida|av|alameda|al|travessa|tv|praça|praca)\.?\s+/i.test(value)
+        ) || '';
+        const addressParts = address.match(/^(.*?\D)(?:\s*,?\s+)(\d{1,5}[A-Za-z]?)$/);
+        const metadata = cardMetadata(card, {
+            streetSelectors: ['[data-qa="POSTING_CARD_ADDRESS"]', '[class*="address" i]'],
+            areaSelectors: ['[data-qa="POSTING_CARD_FEATURES"] span'],
+            bedroomSelectors: ['[aria-label*="quarto" i]', '[data-qa*="BEDROOM"]'],
+            bathroomSelectors: ['[aria-label*="banheiro" i]', '[data-qa*="BATHROOM"]'],
+            parkingSelectors: ['[aria-label*="vaga" i]', '[data-qa*="PARKING"]'],
+            condominiumSelectors: ['[data-qa*="EXPENSE"]', '[data-qa*="CONDOMINIUM"]'],
+            iptuSelectors: ['[data-qa*="IPTU"]'],
+        });
+        if (href && (price || area)) {
+            results.push({
+                title: title,
+                price: price,
+                area: metadata.area || area,
+                location: location,
+                ...metadata,
+                street: addressParts ? addressParts[1].trim() : (address || metadata.street || location),
+                number: addressParts ? addressParts[2] : '',
+                link: href
+            });
+        }
+    });
+    return results;
+}
+"""
+
+
 class CrawleeScraper:
     """Scraper do pipeline para VivaReal, ZAP, OLX, QuintoAndar e Imovelweb."""
-    
+
     def __init__(self, raw_data_path=None):
         self.raw_data_path = raw_data_path
         self.pagination_stats = []
@@ -107,7 +291,7 @@ class CrawleeScraper:
     def listing_with_contract(item):
         """Returns a raw listing with every CSV column present and ordered."""
         return {column: item.get(column, "") or "" for column in RAW_LISTING_COLUMNS}
-        
+
     @staticmethod
     def slugify(text):
         """Converts neighborhood name to URL slug format."""
@@ -266,7 +450,7 @@ class CrawleeScraper:
         if sites is None:
             # By default scrape all 5 sites
             sites = ["vivareal", "zap", "olx", "quintoandar", "imovelweb"]
-            
+
         start_urls = []
         normalized_filters = {
             self.slugify(name): limits for name, limits in (price_filters or {}).items()
@@ -275,14 +459,14 @@ class CrawleeScraper:
             slug = self.slugify(neighborhood)
             if not slug:
                 continue
-                
+
             neighborhood_escaped = urllib.parse.quote(neighborhood)
             limits = normalized_filters.get(slug, {})
             common_price_params = {
                 "precoMinimo": limits.get("min"),
                 "precoMaximo": limits.get("max"),
             }
-            
+
             if "vivareal" in sites:
                 url = f"https://www.vivareal.com.br/venda/minas-gerais/belo-horizonte/bairros/{slug}/apartamento_residencial/"
                 url = self.add_query_params(url, common_price_params)
@@ -291,7 +475,7 @@ class CrawleeScraper:
                     "label": "VIVAREAL",
                     "userData": {"neighborhood": neighborhood, "site": "VivaReal"}
                 })
-                
+
             if "zap" in sites:
                 url = f"https://www.zapimoveis.com.br/venda/apartamentos/mg%2Bbelo-horizonte%2B%2B{slug}/"
                 url = self.add_query_params(url, common_price_params)
@@ -300,7 +484,7 @@ class CrawleeScraper:
                     "label": "ZAP",
                     "userData": {"neighborhood": neighborhood, "site": "Zap Imóveis"}
                 })
-                
+
             if "olx" in sites:
                 url = f"https://www.olx.com.br/imoveis/venda/apartamentos/estado-mg/belo-horizonte-e-regiao?q={neighborhood_escaped}"
                 url = self.add_query_params(url, {"pe": limits.get("max")})
@@ -309,7 +493,7 @@ class CrawleeScraper:
                     "label": "OLX",
                     "userData": {"neighborhood": neighborhood, "site": "OLX"}
                 })
-                
+
             if "quintoandar" in sites:
                 maximum = limits.get("max")
                 if maximum is not None:
@@ -325,7 +509,7 @@ class CrawleeScraper:
                     "label": "QUINTOANDAR",
                     "userData": {"neighborhood": neighborhood, "site": "QuintoAndar"}
                 })
-                
+
             if "imovelweb" in sites:
                 maximum = limits.get("max")
                 minimum_area = limits.get("min_area_m2")
@@ -340,7 +524,7 @@ class CrawleeScraper:
                     "label": "IMOVELWEB",
                     "userData": {"neighborhood": neighborhood, "site": "Imovelweb"}
                 })
-                
+
         return start_urls
 
     async def scrape(
@@ -359,15 +543,15 @@ class CrawleeScraper:
         if not start_urls:
             print("No neighborhood links were generated.")
             return []
-            
+
         print(f"Starting Crawlee PlaywrightCrawler for {len(neighborhoods)} neighborhoods across {len(start_urls)} target URLs...")
-        
+
         # Isolate Crawlee persistence per run. This avoids Windows file locks from
         # an interrupted or overlapping prior process and prevents data mixing.
         storage_dir = os.path.abspath(os.path.join("storage", "runs", uuid.uuid4().hex))
         configuration = Configuration(storage_dir=storage_dir, purge_on_start=True)
         dataset = await Dataset.open(configuration=configuration)
-        
+
         # Configure the crawler
         crawler = PlaywrightCrawler(
             configuration=configuration,
@@ -422,7 +606,7 @@ class CrawleeScraper:
                 item["site"] = site
                 await context.push_data(self.listing_with_contract(item))
             return should_continue
-        
+
         # --- VivaReal Request Handler ---
         @crawler.router.handler("VIVAREAL")
         async def handle_vivareal(context: PlaywrightCrawlingContext) -> None:
@@ -431,7 +615,7 @@ class CrawleeScraper:
             neighborhood = user_data.get("neighborhood", "Desconhecido")
             site = user_data.get("site", "VivaReal")
             context.log.info(f"Processando VivaReal: {neighborhood} -> {url}")
-            
+
             page = context.page
             try:
                 await page.wait_for_selector(
@@ -446,47 +630,13 @@ class CrawleeScraper:
                     f"VivaReal did not render listing cards for {neighborhood}"
                 ) from e
 
-            listings = await page.evaluate(CARD_METADATA_HELPERS + """
-                () => {
-                    const cards = document.querySelectorAll('a.olx-core-surface, .group\\\\/card, a[class*="olx-core-surface"]');
-                    const results = [];
-                    cards.forEach(card => {
-                        const href = card.href || '';
-                        const addrEl = card.querySelector('[data-cy="rp-cardProperty-location-txt"]');
-                        const address = addrEl ? addrEl.textContent.trim() : '';
-                        const cardTitle = card.getAttribute('title') || '';
-                        const priceEl = card.querySelector('[data-cy="rp-cardProperty-price-txt"]');
-                        const price = priceEl ? priceEl.textContent.trim() : '';
-                        const areaEl = card.querySelector('[data-cy="rp-cardProperty-propertyArea-txt"]');
-                        const metadata = cardMetadata(card, {
-                            streetSelectors: ['[data-cy="rp-cardProperty-address-txt"]', '[data-cy*="address"]'],
-                            areaSelectors: ['[data-cy="rp-cardProperty-propertyArea-txt"]'],
-                            bedroomSelectors: ['[data-cy*="bedroom"]', '[data-cy*="dormitory"]'],
-                            bathroomSelectors: ['[data-cy*="bathroom"]'],
-                            parkingSelectors: ['[data-cy*="garage"]', '[data-cy*="parking"]'],
-                            condominiumSelectors: ['[data-cy*="condominium"]'],
-                            iptuSelectors: ['[data-cy*="iptu"]'],
-                        });
-                        const area = metadata.area || (areaEl ? areaEl.textContent.trim() : '');
-                        if (href && (price || area)) {
-                            results.push({
-                                title: cardTitle || address,
-                                price: price,
-                                area: area,
-                                ...metadata,
-                                link: href
-                            });
-                        }
-                    });
-                    return results;
-                }
-            """)
+            listings = await page.evaluate(VIVAREAL_CARD_SCRIPT)
 
             if not listings:
                 os.makedirs("data/diagnostics/screenshots", exist_ok=True)
                 await page.screenshot(path=f"data/diagnostics/screenshots/vivareal_{self.slugify(neighborhood)}_empty.png")
                 raise RuntimeError(f"VivaReal returned no extractable cards for {neighborhood}")
-            
+
             context.log.info(f"[VivaReal] Found {len(listings)} listings in {neighborhood}.")
             current_page_match = re.search(r'[?&]pagina=(\d+)', url)
             current_page = int(current_page_match.group(1)) if current_page_match else 1
@@ -504,7 +654,7 @@ class CrawleeScraper:
             neighborhood = user_data.get("neighborhood", "Desconhecido")
             site = user_data.get("site", "Zap Imóveis")
             context.log.info(f"Processing ZAP Imóveis: {neighborhood} -> {url}")
-            
+
             page = context.page
             try:
                 await page.wait_for_selector(
@@ -519,42 +669,8 @@ class CrawleeScraper:
                     f"ZAP did not render listing cards for {neighborhood}"
                 ) from e
 
-            listings = await page.evaluate(CARD_METADATA_HELPERS + """
-                () => {
-                    const cards = document.querySelectorAll('a.olx-core-surface, .group\\\\/card, a[class*="olx-core-surface"]');
-                    const results = [];
-                    cards.forEach(card => {
-                        const href = card.href || '';
-                        const addrEl = card.querySelector('[data-cy="rp-cardProperty-location-txt"]');
-                        const address = addrEl ? addrEl.textContent.trim() : '';
-                        const cardTitle = card.getAttribute('title') || '';
-                        const priceEl = card.querySelector('[data-cy="rp-cardProperty-price-txt"]');
-                        const price = priceEl ? priceEl.textContent.trim() : '';
-                        const areaEl = card.querySelector('[data-cy="rp-cardProperty-propertyArea-txt"]');
-                        const metadata = cardMetadata(card, {
-                            streetSelectors: ['[data-cy="rp-cardProperty-address-txt"]', '[data-cy*="address"]'],
-                            areaSelectors: ['[data-cy="rp-cardProperty-propertyArea-txt"]'],
-                            bedroomSelectors: ['[data-cy*="bedroom"]', '[data-cy*="dormitory"]'],
-                            bathroomSelectors: ['[data-cy*="bathroom"]'],
-                            parkingSelectors: ['[data-cy*="garage"]', '[data-cy*="parking"]'],
-                            condominiumSelectors: ['[data-cy*="condominium"]'],
-                            iptuSelectors: ['[data-cy*="iptu"]'],
-                        });
-                        const area = metadata.area || (areaEl ? areaEl.textContent.trim() : '');
-                        if (href && (price || area)) {
-                            results.push({
-                                title: cardTitle || address,
-                                price: price,
-                                area: area,
-                                ...metadata,
-                                link: href
-                            });
-                        }
-                    });
-                    return results;
-                }
-            """)
-            
+            listings = await page.evaluate(ZAP_CARD_SCRIPT)
+
             context.log.info(f"[ZAP Imóveis] Found {len(listings)} listings in {neighborhood}.")
             if not listings:
                 page_title = await page.title()
@@ -579,7 +695,7 @@ class CrawleeScraper:
             neighborhood = user_data.get("neighborhood", "Desconhecido")
             site = user_data.get("site", "OLX")
             context.log.info(f"Processando OLX: {neighborhood} -> {url}")
-            
+
             page = context.page
             try:
                 await page.wait_for_selector("section[class*='olx-adcard']", timeout=15000)
@@ -591,49 +707,8 @@ class CrawleeScraper:
                     f"OLX did not render listing cards for {neighborhood}"
                 ) from e
 
-            listings = await page.evaluate(CARD_METADATA_HELPERS + """
-                () => {
-                    const cards = document.querySelectorAll('section[class*="olx-adcard"]');
-                    const results = [];
-                    cards.forEach(card => {
-                        const linkEl = card.querySelector('a[data-testid="adcard-link"].olx-adcard__link');
-                        const href = linkEl ? linkEl.href : '';
-                        const titleEl = card.querySelector('h2.olx-adcard__title');
-                        const title = titleEl ? titleEl.textContent.trim() : '';
-                        const priceEl = card.querySelector('h3.olx-adcard__price');
-                        const price = priceEl ? priceEl.textContent.trim() : '';
-                        
-                        const details = Array.from(card.querySelectorAll('div[class*="olx-adcard__detail"]'));
-                        const areaEl = details.find(d => d.textContent.includes('m²'));
-                        const area = areaEl ? areaEl.textContent.trim() : '';
-                        
-                        const locEl = card.querySelector('p.olx-adcard__location');
-                        const location = locEl ? locEl.textContent.trim() : '';
-                        const metadata = cardMetadata(card, {
-                            streetSelectors: [],
-                            areaSelectors: ['[aria-label*="metros quadrados" i]'],
-                            bedroomSelectors: ['[aria-label*="quarto" i]', '[class*="bedroom"]'],
-                            bathroomSelectors: ['[aria-label*="banheiro" i]', '[class*="bathroom"]'],
-                            parkingSelectors: ['[aria-label*="vaga" i]', '[class*="parking"]'],
-                            condominiumSelectors: ['[class*="condominium"]'],
-                            iptuSelectors: ['[class*="iptu"]'],
-                        });
-                        
-                        if (href && !href.endsWith('#') && (price || area)) {
-                            results.push({
-                                title: title || location,
-                                location: location,
-                                price: price,
-                                area: area,
-                                ...metadata,
-                                link: href
-                            });
-                        }
-                    });
-                    return results;
-                }
-            """)
-            
+            listings = await page.evaluate(OLX_CARD_SCRIPT)
+
             total_listings = len(listings)
             listings = [
                 item for item in listings
@@ -662,7 +737,7 @@ class CrawleeScraper:
             neighborhood = user_data.get("neighborhood", "Desconhecido")
             site = user_data.get("site", "QuintoAndar")
             context.log.info(f"Processando QuintoAndar: {neighborhood} -> {url}")
-            
+
             page = context.page
             try:
                 await page.wait_for_selector(
@@ -677,63 +752,12 @@ class CrawleeScraper:
                     f"QuintoAndar did not render listing cards for {neighborhood}"
                 ) from e
 
-            quintoandar_card_script = CARD_METADATA_HELPERS + r"""
-                () => {
-                    const cards = document.querySelectorAll('div[data-testid="house-card-container"] a[href*="/imovel/"]');
-                    const results = [];
-                    cards.forEach(card => {
-                        const href = card.href || '';
-                        const lines = (card.innerText || '').split('\n').map(value => value.trim()).filter(Boolean);
-                        const priceIndex = lines.findIndex(value => /^R\$\s*/.test(value));
-                        const title = priceIndex > 0
-                            ? lines.slice(0, priceIndex).filter(value => !/^(Exclusivo|Anúncio novo)$/i.test(value)).join(' ')
-                            : (card.getAttribute('title') || '');
-                        const price = priceIndex >= 0 ? lines[priceIndex] : '';
-                        const costLine = lines.slice(priceIndex + 1).find(
-                            value => /condo\.?|condom[ií]nio/i.test(value)
-                        ) || '';
-                        const condominiumMatch = costLine.match(
-                            /(R\$\s*[\d.]+(?:,\d{1,2})?)\s*condo\.?|condom[ií]nio/i
-                        );
-                        const amenities = lines.find(value => /\d+\s*m[²2]/i.test(value)) || '';
-                        const location = lines.find(value => /·\s*Belo Horizonte/i.test(value)) || '';
-                        const address = location.split(/\s*,\s*[^,]+?\s*·/)[0].trim();
-                        const addressParts = address.match(/^(.*?\D)(?:\s*,?\s+)(\d{1,5}[A-Za-z]?)$/);
-                        const area = (amenities.match(/\d+(?:[.,]\d+)?\s*m[²2]/i) || [''])[0];
-                        const metadata = cardMetadata(card, {
-                            streetSelectors: [],
-                            areaSelectors: [],
-                            bedroomSelectors: ['[aria-label*="quarto" i]', '[data-testid*="bedroom"]'],
-                            bathroomSelectors: ['[aria-label*="banheiro" i]', '[data-testid*="bathroom"]'],
-                            parkingSelectors: ['[aria-label*="vaga" i]', '[data-testid*="parking"]'],
-                            condominiumSelectors: ['[class*="condominium"]'],
-                            iptuSelectors: ['[class*="iptu"]'],
-                        });
-                        
-                        if (href && (price || area)) {
-                            results.push({
-                                title: title,
-                                price: price,
-                                area: metadata.area || area,
-                                location: location,
-                                ...metadata,
-                                street: addressParts ? addressParts[1].trim() : address,
-                                number: addressParts ? addressParts[2] : '',
-                                condominium: condominiumMatch ? condominiumMatch[1] : metadata.condominium,
-                                link: href
-                            });
-                        }
-                    });
-                    return results;
-                }
-            """
-
             # QuintoAndar appends cards in the current document through the
             # "Ver mais" button.  The old ?page=N URL does not change its
             # server-side result set, so it only produced duplicates.
             current_page = 1
             while True:
-                listings = await page.evaluate(quintoandar_card_script)
+                listings = await page.evaluate(QUINTOANDAR_CARD_SCRIPT)
                 matching_listings = [
                     item for item in listings
                     if self.is_quintoandar_location_match(item.get("location"), neighborhood)
@@ -779,7 +803,7 @@ class CrawleeScraper:
             neighborhood = user_data.get("neighborhood", "Desconhecido")
             site = user_data.get("site", "Imovelweb")
             context.log.info(f"Processando Imovelweb: {neighborhood} -> {url}")
-            
+
             page = context.page
             try:
                 await page.wait_for_selector(
@@ -797,62 +821,8 @@ class CrawleeScraper:
                     f"Imovelweb did not render listing cards for {neighborhood}"
                 ) from e
 
-            listings = await page.evaluate(CARD_METADATA_HELPERS + r"""
-                () => {
-                    const cards = document.querySelectorAll('div[class*="postingCardLayout-module__posting-card-container"]');
-                    const results = [];
-                    cards.forEach(card => {
-                        const linkEl = card.querySelector('h2[class*="posting-description"] a');
-                        const href = linkEl ? linkEl.href : '';
-                        const title = linkEl ? linkEl.textContent.trim() : '';
-                        const priceEl = card.querySelector('[data-qa="POSTING_CARD_PRICE"]');
-                        const price = priceEl ? priceEl.textContent.trim() : '';
-                        
-                        const featuresEl = card.querySelector('[data-qa="POSTING_CARD_FEATURES"]');
-                        let area = '';
-                        if (featuresEl) {
-                            const spans = Array.from(featuresEl.querySelectorAll('span')).map(readText);
-                            const utilSpan = spans.find(s => /m[²2]\s*(?:[úu]til|privativ)/i.test(s));
-                            const cleanSpan = spans.find(s => /m[²2]/i.test(s) && !/tot|terreno/i.test(s));
-                            const anySpan = spans.find(s => /m[²2]/i.test(s));
-                            area = utilSpan || cleanSpan || anySpan || '';
-                        }
-                        const locationEl = card.querySelector('[data-qa="POSTING_CARD_LOCATION"]');
-                        const location = locationEl ? locationEl.textContent.trim() : '';
-                        const addressCandidates = Array.from(
-                            card.querySelectorAll('[data-qa*="ADDRESS"], [class*="address" i], strong, b')
-                        ).map(readText);
-                        const address = addressCandidates.find(
-                            value => /^(?:rua|r|avenida|av|alameda|al|travessa|tv|praça|praca)\\.?\\s+/i.test(value)
-                        ) || '';
-                        const addressParts = address.match(/^(.*?\\D)(?:\\s*,?\\s+)(\\d{1,5}[A-Za-z]?)$/);
-                        const metadata = cardMetadata(card, {
-                            streetSelectors: ['[data-qa="POSTING_CARD_ADDRESS"]', '[class*="address" i]'],
-                            areaSelectors: ['[data-qa="POSTING_CARD_FEATURES"] span'],
-                            bedroomSelectors: ['[aria-label*="quarto" i]', '[data-qa*="BEDROOM"]'],
-                            bathroomSelectors: ['[aria-label*="banheiro" i]', '[data-qa*="BATHROOM"]'],
-                            parkingSelectors: ['[aria-label*="vaga" i]', '[data-qa*="PARKING"]'],
-                            condominiumSelectors: ['[data-qa*="EXPENSE"]', '[data-qa*="CONDOMINIUM"]'],
-                            iptuSelectors: ['[data-qa*="IPTU"]'],
-                        });
-                        
-                        if (href && (price || area)) {
-                            results.push({
-                                title: title,
-                                price: price,
-                                area: metadata.area || area,
-                                location: location,
-                                ...metadata,
-                                street: addressParts ? addressParts[1].trim() : (address || metadata.street || location),
-                                number: addressParts ? addressParts[2] : '',
-                                link: href
-                            });
-                        }
-                    });
-                    return results;
-                }
-            """)
-            
+            listings = await page.evaluate(IMOVELWEB_CARD_SCRIPT)
+
             matching_listings = [
                 item for item in listings
                 if self.is_imovelweb_location_match(item.get("location"), neighborhood)
@@ -890,7 +860,7 @@ class CrawleeScraper:
             results = await dataset.get_data()
             items = results.items
             print(f"Scrape complete. Total listings collected by Crawlee: {len(items)}")
-            
+
             if items and self.raw_data_path:
                 df = pd.DataFrame(items)
                 os.makedirs(os.path.dirname(self.raw_data_path), exist_ok=True)

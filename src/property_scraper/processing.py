@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 import pandas as pd
 
 from .config import Settings
-from .errors import DataQualityError, SchemaError
+from .errors import DataQualityError
 from .models import StageResult
 from .normalization import (
     clean_numeric,
@@ -23,17 +23,17 @@ from .normalization import (
     normalize_number,
     normalize_street,
     parse_listing_address,
-    validate_typology_coherence,
 )
 from .parking import classify_parking
-from .sources.pbh import ITBI_REQUIRED, IPTU_REQUIRED, validate_csv_schema
+from .sources.pbh import IPTU_REQUIRED, ITBI_REQUIRED, validate_csv_schema
 from .storage import read_csv_auto, write_dataset
 
 
 def _read_csv(path: Path, sep: str | None = None) -> pd.DataFrame:
     failures: list[str] = []
     if sep is None:
-        first_line = path.open("r", encoding="utf-8-sig", errors="replace").readline()
+        with path.open("r", encoding="utf-8-sig", errors="replace") as f:
+            first_line = f.readline()
         sep = ";" if first_line.count(";") > first_line.count(",") else ","
     for encoding in ("utf-8-sig", "latin1"):
         try:
@@ -365,7 +365,7 @@ def prepare_reference_data(settings: Settings) -> StageResult:
 
 
 def prepare_scraped_listings(settings: Settings, now: datetime | None = None) -> StageResult:
-    """Normalize only the latest local scraper run, without network access."""
+    """Normalize local scraper runs within the configured freshness window, without network access."""
     stats_path = settings.paths.processed / "neighborhood_stats.csv"
     known_neighborhoods: list[str] | None = None
     if stats_path.exists():

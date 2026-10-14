@@ -88,7 +88,7 @@ python main.py validate-cards --sites vivareal --neighborhood BELVEDERE --max-pr
 - `data/reports`: the latest `bh_property_report_*.xlsx` file and run manifest.
 - `data/diagnostics/card-validation`: portal-card validation reports and samples.
 
-The project retains only the current canonical source snapshots, latest listing run, latest report, and latest run manifest.
+Listing runs under `data/listings/<run_id>` accumulate daily collections within `listing_freshness_days` (default 30 days) to track listing history and price changes across dates. `data/listings/latest.txt` records the most recent run ID. Reports and run manifests in `data/reports` retain the latest generated outputs.
 
 ## Documentation
 

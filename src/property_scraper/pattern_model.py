@@ -13,7 +13,6 @@ from sklearn.preprocessing import OneHotEncoder
 from .errors import DataQualityError
 from .normalization import normalize_neighborhood, normalize_street
 
-
 VALID_PATTERNS = {"P1", "P2", "P3", "P4", "P5"}
 MODEL_VERSION = "random-forest-no-price-v2"
 RARE_STREET = "RARE_STREET"
