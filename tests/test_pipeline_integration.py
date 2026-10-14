@@ -1,5 +1,6 @@
-from pathlib import Path
+from datetime import datetime, timezone
 import json
+from pathlib import Path
 
 import pandas as pd
 
@@ -66,16 +67,17 @@ def test_pipeline_without_network(project):
     assert record["parking_type"] == "independent"
     assert record["ranking_status"] == "parking_eligible"
     expected_leading_columns = [
-        "source", "source_file", "collected_at", "listing_age_days", "requested_neighborhood",
+        "source", "source_file", "collected_at", "collected_date", "listing_age_days", "requested_neighborhood",
         "cep", "cep_original", "cep_inference_method", "evidence_level", "match_reason",
         "classification_method", "classification_confidence", "classifier_version",
         "opportunity_criteria", "opportunity_status", "ranking_status", "ranking_priority",
+        "duplicate_count", "min_advertised_price", "alternate_urls", "area_warning",
         "neighborhood_method", "title", "url",
         "neighborhood", "price", "area_m2", "price_m2", "bedrooms", "bathrooms",
         "parking_spaces", "parking_type", "parking_evidence", "parking_confidence",
         "parking_review_status", "condominium", "advertised_iptu", "street", "number",
         "finish_pattern", "building_year", "itbi_m2_neighborhood_mean",
-        "itbi_m2_neighborhood_pattern_mean", "listing_m2_neighborhood_mean",
+        "itbi_m2_neighborhood_pattern_mean", "conservative_ref_m2", "listing_m2_neighborhood_mean",
         "listing_m2_neighborhood_pattern_mean", "itbi_m2_neighborhood_median",
         "itbi_neighborhood_sales_count", "itbi_m2_neighborhood_pattern_median",
     ]
@@ -227,3 +229,47 @@ def test_single_page_config_uses_compatible_minimum(tmp_path):
     settings = load_settings(config_path)
     assert settings.pages_per_neighborhood == 1
     assert settings.min_pages_per_neighborhood == 1
+
+
+def test_multiple_runs_accumulate_daily_history(project):
+    root, config_path = project
+    settings = load_settings(config_path)
+
+    run_1_dir = root / "data" / "listings" / "run_2026_08_13"
+    run_1_dir.mkdir(parents=True)
+    pd.DataFrame([{
+        "title": "Apartamento em Rua Ptolomeu 130, Anchieta",
+        "price": "R$ 400.000", "area": "50 m²", "link": "https://example.test/ad1",
+        "neighborhood": "ANCHIETA", "site": "VivaReal",
+        "collected_at": "2026-08-13T10:00:00+00:00",
+        "collected_date": "2026-08-13",
+    }]).to_csv(run_1_dir / "vivareal.csv", index=False, sep=";", encoding="utf-8-sig")
+
+    run_2_dir = root / "data" / "listings" / "run_2026_08_14"
+    run_2_dir.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "title": "Apartamento em Rua Ptolomeu 130, Anchieta",
+            "price": "R$ 390.000", "area": "50 m²", "link": "https://example.test/ad1",
+            "neighborhood": "ANCHIETA", "site": "VivaReal",
+            "collected_at": "2026-08-14T10:00:00+00:00",
+            "collected_date": "2026-08-14",
+        },
+        {
+            "title": "Apartamento Novo em Rua Ptolomeu 140, Anchieta",
+            "price": "R$ 450.000", "area": "60 m²", "link": "https://example.test/ad2",
+            "neighborhood": "ANCHIETA", "site": "VivaReal",
+            "collected_at": "2026-08-14T10:00:00+00:00",
+            "collected_date": "2026-08-14",
+        },
+    ]).to_csv(run_2_dir / "vivareal.csv", index=False, sep=";", encoding="utf-8-sig")
+
+    now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+    listings = prepare_listings(settings, ["ANCHIETA"], now=now)
+    assert len(listings) == 3
+    assert set(listings["collected_date"]) == {"2026-08-13", "2026-08-14"}
+    assert set(listings["url"]) == {"https://example.test/ad1", "https://example.test/ad2"}
+    ad1_records = listings[listings["url"] == "https://example.test/ad1"]
+    assert len(ad1_records) == 2
+    assert set(ad1_records["collected_date"]) == {"2026-08-13", "2026-08-14"}
+

@@ -81,13 +81,80 @@ def extract_area_m2(value: Any) -> float:
         return 0.0
     text = str(value)
     numeric = r"\d+(?:[.,]\s*\d+)?"
+    # Priority 1: explicit util or privativa
+    util_match = re.search(rf"({numeric})\s*m[²2]\s*(?:[úu]til|privativ)", text, re.I)
+    if util_match:
+        return clean_numeric(util_match.group(1))
+    # Priority 2: range
     range_match = re.search(rf"({numeric})\s*(?:-|a)\s*{numeric}\s*m[²2]", text, re.I)
     if range_match:
         return clean_numeric(range_match.group(1))
+    # Priority 3: clean m2 without total/terreno immediately after
+    clean_match = re.search(rf"({numeric})\s*m[²2](?!\s*(?:tot|total|terreno))", text, re.I)
+    if clean_match:
+        return clean_numeric(clean_match.group(1))
+    # Priority 4: any m2
     match = re.search(rf"({numeric})\s*m[²2]", text, re.I)
     if match:
         return clean_numeric(match.group(1))
     return clean_numeric(value) if re.fullmatch(r"\s*[\d.,]+\s*", text) else 0.0
+
+
+TYPOLOGY_AREA_LIMIT_M2 = 300
+# Only these terms justify a large unit (GEMINI.md §1). Words such as CASA,
+# TERRENO or LOTE describe a different property type and must not exempt it.
+LARGE_UNIT_KEYWORDS = ("COBERTURA", "PRIVATIVA", "AREA PRIVATIVA", "DUPLEX", "TRIPLEX", "GARDEN", "GARDEM")
+_BEDROOMS_IN_TEXT = re.compile(r"(\d+)\s*(?:quartos?|dormitorios?)\b", re.I)
+
+
+def validate_typology_coherence(title: str, area_m2: float, bedrooms: float = 0.0) -> tuple[bool, str]:
+    """Validates whether an apartment area is coherent with its title description.
+
+    Conventional apartments (2 to 4 bedrooms) > 300 m² without keywords
+    indicating coverage, private area, or duplex/garden are flagged to avoid
+    land/total-area distortions. When the bedroom count is unknown, the unit is
+    treated as conventional so the check stays conservative.
+    """
+    if area_m2 <= TYPOLOGY_AREA_LIMIT_M2:
+        return True, ""
+    normalized_title = strip_accents(str(title or "")).upper()
+    rooms = int(bedrooms or 0)
+    if rooms <= 0:
+        match = _BEDROOMS_IN_TEXT.search(normalized_title)
+        rooms = int(match.group(1)) if match else 0
+    if rooms and not 2 <= rooms <= 4:
+        return True, ""
+    for kw in LARGE_UNIT_KEYWORDS:
+        if re.search(rf"\b{re.escape(kw)}\b", normalized_title):
+            return True, ""
+    return False, "area_mismatch_warning"
+
+
+def detect_area_warning(area_text: Any, title: str, area_m2: float, bedrooms: float = 0.0) -> str:
+    """Returns an area warning tag if area is suspicious, unverified, or mismatched."""
+    text = str(area_text or "")
+    if re.search(r"m[²2]\s*(?:tot|total|terreno)", text, re.I) and not re.search(r"m[²2]\s*(?:[úu]til|privativ)", text, re.I):
+        return "area_total_only"
+    is_coherent, warning = validate_typology_coherence(title, area_m2, bedrooms)
+    if not is_coherent:
+        return warning
+    return ""
+
+
+def _region_tokens(value: Any) -> str:
+    """Accent-free upper-case text where URL/slug separators become spaces."""
+    text = strip_accents(str(value or "")).upper()
+    return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9]+", " ", text)).strip()
+
+
+def find_excluded_region(text: Any, regions: list[str]) -> str:
+    """Return the first out-of-area region mentioned in ``text`` (GEMINI.md §3)."""
+    haystack = f" {_region_tokens(text)} "
+    for region in regions:
+        token = _region_tokens(region)
+        if token and f" {token} " in haystack:
+            return token
+    return ""
 
 
 def safe_literal(value: Any) -> Any:

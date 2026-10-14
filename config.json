@@ -26,6 +26,7 @@
   "min_area_m2": 40,
   "iptu_staleness_days": 75,
   "itbi_history_start": "2024-06",
+  "excluded_regions": ["RIBEIRAO DAS NEVES", "SANTA MONICA", "BARREIRO", "BETIM", "CONTAGEM"],
   "pbh": {
     "api_base_url": "https://dados.pbh.gov.br/api/3/action",
     "iptu_dataset": "cadastro-imobiliario-regional-centro-sul",

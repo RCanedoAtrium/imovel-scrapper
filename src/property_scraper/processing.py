@@ -12,15 +12,18 @@ from .errors import DataQualityError, SchemaError
 from .models import StageResult
 from .normalization import (
     clean_numeric,
+    detect_area_warning,
     extract_area_m2,
     extract_currency,
     extract_nested,
+    find_excluded_region,
     normalize_cep,
     normalize_column_name,
     normalize_neighborhood,
     normalize_number,
     normalize_street,
     parse_listing_address,
+    validate_typology_coherence,
 )
 from .parking import classify_parking
 from .sources.pbh import ITBI_REQUIRED, IPTU_REQUIRED, validate_csv_schema
@@ -174,116 +177,165 @@ def _canonical_url(value: object) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), "", ""))
 
 
-def prepare_listings(settings: Settings, known_neighborhoods: list[str] | None = None) -> pd.DataFrame:
-    latest_pointer = settings.paths.listings / "latest.txt"
-    if not latest_pointer.exists():
-        raise DataQualityError(f"Listing pointer is missing: {latest_pointer}")
-    latest_run = latest_pointer.read_text(encoding="utf-8").strip()
-    files = sorted((settings.paths.listings / latest_run).glob("*.csv"))
-    if not files:
-        raise DataQualityError(f"No listing CSV files found in {settings.paths.listings}")
+def prepare_listings(
+    settings: Settings,
+    known_neighborhoods: list[str] | None = None,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    listing_root = settings.paths.listings
+    if not listing_root.exists():
+        raise DataQualityError(f"Listing directory is missing: {listing_root}")
+
+    run_dirs = sorted([d for d in listing_root.iterdir() if d.is_dir() and not d.name.startswith(".")])
+    if not run_dirs:
+        latest_pointer = listing_root / "latest.txt"
+        if latest_pointer.exists():
+            latest_run = latest_pointer.read_text(encoding="utf-8").strip()
+            target = listing_root / latest_run
+            if target.is_dir():
+                run_dirs = [target]
+    if not run_dirs:
+        raise DataQualityError(f"No listing CSV files found in {listing_root}")
+
     records: list[dict[str, object]] = []
-    for path in files:
-        frame = read_csv_auto(path, dtype=str, low_memory=False)
-        collected_datetime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
-        collected_at = collected_datetime.isoformat()
-        age_days = (datetime.now(timezone.utc) - collected_datetime).days
-        if age_days > settings.listing_freshness_days:
-            continue
-        for _, row in frame.iterrows():
-            source = row.to_dict()
-            price_value = extract_nested(source, ["price", "listing.price", "listing.prices.price", "priceValue"])
-            if isinstance(price_value, dict):
-                price_value = price_value.get("value", price_value.get("amount", 0))
-            area_value = extract_nested(source, ["area", "usableAreaM2", "usableAreas", "usable_area", "listing.usableAreas"])
-            if isinstance(area_value, list):
-                area_value = area_value[0] if area_value else 0
-            title = str(extract_nested(source, ["title", "listing.title", "name"]) or "Apartamento a venda").strip()
-            price_text = str(price_value or "")
-            if re.search(r"/\s*m[eê]s|\balugar\b|\bloca[cç][aã]o\b", f"{price_text} {title}", re.I):
-                continue
-            if re.search(r"\bcasa\b", title, re.I):
-                continue
-            price = extract_currency(price_value)
-            area = extract_area_m2(area_value)
-            title_area = extract_area_m2(title)
-            if title_area > 10 and (area <= 10 or max(area, title_area) / min(area, title_area) > 1.35):
-                area = title_area
-            if price <= 20_000 or area <= 10:
-                continue
-            neighborhood_value = extract_nested(source, [
-                "neighborhood", "address.neighborhood", "listing.address.neighborhood", "listing.address.bairro", "bairro",
-            ])
-            if isinstance(neighborhood_value, dict):
-                neighborhood_value = neighborhood_value.get("name", neighborhood_value.get("neighborhood", ""))
-            link = _canonical_url(extract_nested(source, ["url", "link", "listing.url", "listing.link"]))
-            parsed_street, parsed_number, parsed_cep = parse_listing_address(title)
-            direct_street = extract_nested(source, ["street", "address.street", "listing.address.street"])
-            street = normalize_street(direct_street) if direct_street else parsed_street
-            direct_number = extract_nested(source, ["number", "address.number", "listing.address.number"])
-            number = normalize_number(direct_number) if direct_number else parsed_number
-            cep = parsed_cep
-            text = f"{title} {price_value or ''}"
-            def detail(pattern: str) -> int:
-                match = re.search(pattern, text, re.IGNORECASE)
-                return int(match.group(1)) if match else 0
-            condo_match = re.search(r"Cond\.?\s*R\$\s*([\d.]+)", str(price_value), re.I)
-            iptu_match = re.search(r"IPTU\s*R\$\s*([\d.]+)", str(price_value), re.I)
-            requested_neighborhood = normalize_neighborhood(neighborhood_value)
-            location_text = str(extract_nested(source, ["location", "address", "listing.address"]) or "")
-            evidence_text = normalize_neighborhood(f"{location_text} {title} {link}")
-            candidates = sorted(
-                {normalize_neighborhood(value) for value in (known_neighborhoods or settings.neighborhoods) if value},
-                key=len,
-                reverse=True,
-            )
-            detected = [
-                candidate
-                for candidate in candidates
-                if re.search(rf"(?<!\w){re.escape(candidate)}(?!\w)", evidence_text)
-            ]
-            detected_neighborhood = detected[0] if detected else ""
-            target_neighborhoods = {normalize_neighborhood(value) for value in settings.neighborhoods}
-            if detected_neighborhood and detected_neighborhood not in target_neighborhoods:
-                continue
-            final_neighborhood = detected_neighborhood or requested_neighborhood
-            parking = classify_parking(title)
-            records.append({
-                "source": str(extract_nested(source, ["site", "source"]) or path.stem),
-                "source_file": str(path.relative_to(settings.paths.root)),
-                "collected_at": collected_at,
-                "listing_age_days": age_days,
-                "neighborhood": final_neighborhood,
-                "requested_neighborhood": requested_neighborhood,
-                "neighborhood_method": "content" if detected_neighborhood else "search_context",
-                "title": title,
-                "price": price,
-                "area_m2": area,
-                "price_m2": price / area,
-                "url": link,
-                "bedrooms": clean_numeric(extract_nested(source, ["bedrooms", "listing.bedrooms"]))
-                    or detail(r"(\d+)\s*(?:dormitorio|dormitório|quarto)"),
-                "bathrooms": clean_numeric(extract_nested(source, ["bathrooms", "listing.bathrooms"]))
-                    or detail(r"(\d+)\s*(?:banheiro|banho)"),
-                "parking_spaces": clean_numeric(extract_nested(source, ["parking_spaces", "parking", "listing.parking_spaces"]))
-                    or detail(r"(\d+)\s*(?:vaga|garagem)"),
-                **parking,
-                "condominium": clean_numeric(extract_nested(source, ["condominium", "listing.condominium"]))
-                    or (clean_numeric(condo_match.group(1)) if condo_match else 0.0),
-                "advertised_iptu": clean_numeric(extract_nested(source, ["advertised_iptu", "iptu", "listing.iptu"]))
-                    or (clean_numeric(iptu_match.group(1)) if iptu_match else 0.0),
-                "street": street,
-                "number": number,
-                "cep": cep,
-            })
+    now_utc = now if now is not None else datetime.now(timezone.utc)
+    candidates = sorted(
+        {normalize_neighborhood(value) for value in (known_neighborhoods or settings.neighborhoods) if value},
+        key=len,
+        reverse=True,
+    )
+    target_neighborhoods = {normalize_neighborhood(value) for value in settings.neighborhoods}
+    excluded_regions = [
+        region for region in settings.excluded_regions
+        if normalize_neighborhood(region) not in target_neighborhoods
+    ]
+
+    for run_dir in run_dirs:
+        files = sorted(run_dir.glob("*.csv"))
+        for path in files:
+            frame = read_csv_auto(path, dtype=str, low_memory=False)
+            file_mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            for _, row in frame.iterrows():
+                source = row.to_dict()
+                row_collected_at = str(source.get("collected_at") or "").strip()
+                row_collected_date = str(source.get("collected_date") or "").strip()
+                if row_collected_at:
+                    try:
+                        collected_datetime = datetime.fromisoformat(row_collected_at.replace("Z", "+00:00"))
+                    except ValueError:
+                        collected_datetime = file_mtime
+                else:
+                    collected_datetime = file_mtime
+
+                collected_at = collected_datetime.isoformat()
+                collected_date = row_collected_date or collected_datetime.strftime("%Y-%m-%d")
+                age_days = max(0, (now_utc - collected_datetime).days)
+                if age_days > settings.listing_freshness_days:
+                    continue
+
+                native_pub_date = extract_nested(source, [
+                    "publication_date", "created_at", "listing.createdAt", "published_at",
+                    "listing.updatedAt", "data_publicacao", "publish_date",
+                ])
+                if native_pub_date:
+                    try:
+                        pub_dt = datetime.fromisoformat(str(native_pub_date).replace("Z", "+00:00"))
+                        if (now_utc - pub_dt).days > 180:
+                            continue
+                    except ValueError:
+                        pass
+
+                price_value = extract_nested(source, ["price", "listing.price", "listing.prices.price", "priceValue"])
+                if isinstance(price_value, dict):
+                    price_value = price_value.get("value", price_value.get("amount", 0))
+                area_value = extract_nested(source, ["area", "usableAreaM2", "usableAreas", "usable_area", "listing.usableAreas"])
+                if isinstance(area_value, list):
+                    area_value = area_value[0] if area_value else 0
+                title = str(extract_nested(source, ["title", "listing.title", "name"]) or "Apartamento a venda").strip()
+                price_text = str(price_value or "")
+                if re.search(r"/\s*m[eê]s|\balugar\b|\bloca[cç][aã]o\b", f"{price_text} {title}", re.I):
+                    continue
+                if re.search(r"\bcasa\b", title, re.I):
+                    continue
+                price = extract_currency(price_value)
+                area = extract_area_m2(area_value)
+                title_area = extract_area_m2(title)
+                if title_area > 10 and (area <= 10 or max(area, title_area) / min(area, title_area) > 1.35):
+                    area = title_area
+                if price <= 20_000 or area <= 10:
+                    continue
+                neighborhood_value = extract_nested(source, [
+                    "neighborhood", "address.neighborhood", "listing.address.neighborhood", "listing.address.bairro", "bairro",
+                ])
+                if isinstance(neighborhood_value, dict):
+                    neighborhood_value = neighborhood_value.get("name", neighborhood_value.get("neighborhood", ""))
+                link = _canonical_url(extract_nested(source, ["url", "link", "listing.url", "listing.link"]))
+                parsed_street, parsed_number, parsed_cep = parse_listing_address(title)
+                direct_street = extract_nested(source, ["street", "address.street", "listing.address.street"])
+                street = normalize_street(direct_street) if direct_street else parsed_street
+                direct_number = extract_nested(source, ["number", "address.number", "listing.address.number"])
+                number = normalize_number(direct_number) if direct_number else parsed_number
+                cep = parsed_cep
+                text = f"{title} {price_value or ''}"
+                def detail(pattern: str) -> int:
+                    match = re.search(pattern, text, re.IGNORECASE)
+                    return int(match.group(1)) if match else 0
+                condo_match = re.search(r"Cond\.?\s*R\$\s*([\d.]+)", str(price_value), re.I)
+                iptu_match = re.search(r"IPTU\s*R\$\s*([\d.]+)", str(price_value), re.I)
+                bedrooms = clean_numeric(extract_nested(source, ["bedrooms", "listing.bedrooms"])) or detail(r"(\d+)\s*(?:dormitorio|dormitório|quarto)")
+                area_warning = detect_area_warning(area_value, title, area, bedrooms)
+                requested_neighborhood = normalize_neighborhood(neighborhood_value)
+                location_text = str(extract_nested(source, ["location", "address", "listing.address"]) or "")
+                if find_excluded_region(f"{location_text} {title} {link}", excluded_regions):
+                    continue
+                evidence_text = normalize_neighborhood(f"{location_text} {title} {link}")
+                detected = [
+                    candidate
+                    for candidate in candidates
+                    if re.search(rf"(?<!\w){re.escape(candidate)}(?!\w)", evidence_text)
+                ]
+                detected_neighborhood = detected[0] if detected else ""
+                if detected_neighborhood and detected_neighborhood not in target_neighborhoods:
+                    continue
+                final_neighborhood = detected_neighborhood or requested_neighborhood
+                parking = classify_parking(title)
+                records.append({
+                    "source": str(extract_nested(source, ["site", "source"]) or path.stem),
+                    "source_file": str(path.relative_to(settings.paths.root)),
+                    "collected_at": collected_at,
+                    "collected_date": collected_date,
+                    "listing_age_days": age_days,
+                    "neighborhood": final_neighborhood,
+                    "requested_neighborhood": requested_neighborhood,
+                    "neighborhood_method": "content" if detected_neighborhood else "search_context",
+                    "title": title,
+                    "price": price,
+                    "area_m2": area,
+                    "price_m2": price / area,
+                    "url": link,
+                    "bedrooms": bedrooms,
+                    "bathrooms": clean_numeric(extract_nested(source, ["bathrooms", "listing.bathrooms"]))
+                        or detail(r"(\d+)\s*(?:banheiro|banho)"),
+                    "parking_spaces": clean_numeric(extract_nested(source, ["parking_spaces", "parking", "listing.parking_spaces"]))
+                        or detail(r"(\d+)\s*(?:vaga|garagem)"),
+                    **parking,
+                    "condominium": clean_numeric(extract_nested(source, ["condominium", "listing.condominium"]))
+                        or (clean_numeric(condo_match.group(1)) if condo_match else 0.0),
+                    "advertised_iptu": clean_numeric(extract_nested(source, ["advertised_iptu", "iptu", "listing.iptu"]))
+                        or (clean_numeric(iptu_match.group(1)) if iptu_match else 0.0),
+                    "street": street,
+                    "number": number,
+                    "cep": cep,
+                    "area_warning": area_warning,
+                })
     listings = pd.DataFrame(records)
     if listings.empty:
         raise DataQualityError("No valid listings after normalization")
     listings["street"] = listings["street"].map(normalize_street)
     with_url = listings["url"] != ""
-    url_records = listings[with_url].drop_duplicates(subset=["url"], keep="last")
+    url_records = listings[with_url].drop_duplicates(subset=["url", "collected_date"], keep="last")
     no_url_records = listings[~with_url].drop_duplicates(
-        subset=["neighborhood", "street", "number", "area_m2", "price"], keep="last"
+        subset=["neighborhood", "street", "number", "area_m2", "price", "collected_date"], keep="last"
     )
     return pd.concat([url_records, no_url_records], ignore_index=True)
 
@@ -312,7 +364,7 @@ def prepare_reference_data(settings: Settings) -> StageResult:
     )
 
 
-def prepare_scraped_listings(settings: Settings) -> StageResult:
+def prepare_scraped_listings(settings: Settings, now: datetime | None = None) -> StageResult:
     """Normalize only the latest local scraper run, without network access."""
     stats_path = settings.paths.processed / "neighborhood_stats.csv"
     known_neighborhoods: list[str] | None = None
@@ -320,7 +372,7 @@ def prepare_scraped_listings(settings: Settings) -> StageResult:
         stats = read_csv_auto(stats_path)
         if "neighborhood" in stats:
             known_neighborhoods = stats["neighborhood"].dropna().astype(str).tolist()
-    listings = prepare_listings(settings, known_neighborhoods)
+    listings = prepare_listings(settings, known_neighborhoods, now=now)
     path, manifest = write_dataset(
         listings,
         settings.paths.processed / "listings.csv",
@@ -333,10 +385,10 @@ def prepare_scraped_listings(settings: Settings) -> StageResult:
     )
 
 
-def prepare_all(settings: Settings) -> StageResult:
+def prepare_all(settings: Settings, now: datetime | None = None) -> StageResult:
     """Prepare local reference files and the latest scraper run."""
     reference = prepare_reference_data(settings)
-    listings = prepare_scraped_listings(settings)
+    listings = prepare_scraped_listings(settings, now=now)
     return StageResult(
         stage="prepare",
         artifacts=reference.artifacts + listings.artifacts,

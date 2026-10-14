@@ -104,8 +104,12 @@ class ListingCollector:
                     previous = base_dir / f"{site}.csv"
                     if previous.exists():
                         existing = read_csv_auto(previous, dtype=str, low_memory=False).fillna("")
+                site_df = pd.DataFrame(site_items, columns=RAW_LISTING_COLUMNS)
+                now_utc = datetime.now(timezone.utc)
+                site_df["collected_at"] = now_utc.isoformat()
+                site_df["collected_date"] = now_utc.strftime("%Y-%m-%d")
                 merged = pd.concat(
-                    [existing, pd.DataFrame(site_items, columns=RAW_LISTING_COLUMNS)],
+                    [existing, site_df],
                     ignore_index=True,
                 )
                 if "link" in merged:
@@ -138,9 +142,6 @@ class ListingCollector:
 
         latest = self.settings.paths.listings / "latest.txt"
         latest.write_text(run_id, encoding="utf-8")
-        for previous in self.settings.paths.listings.iterdir():
-            if previous.is_dir() and previous != run_dir:
-                shutil.rmtree(previous)
         return StageResult(
             stage="scrape",
             artifacts=artifacts,

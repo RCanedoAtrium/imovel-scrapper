@@ -102,7 +102,7 @@ def _latest_name(directory: Path) -> str:
 def _round_for_report(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     money_columns = {
-        "price", "condominium", "advertised_iptu", "transaction_price",
+        "price", "min_advertised_price", "condominium", "advertised_iptu", "transaction_price",
         "itbi_m2_mean", "itbi_m2_median", "itbi_m2_p30", "itbi_m2_p80",
         "itbi_m2_neighborhood_mean", "itbi_m2_neighborhood_pattern_mean",
         "itbi_m2_neighborhood_median", "itbi_m2_neighborhood_pattern_median",
@@ -136,17 +136,18 @@ def _format_sheet(writer: pd.ExcelWriter, name: str, frame: pd.DataFrame) -> Non
         width = min(max(len(str(column)) + 2, 12), 38)
         if column == "title":
             width = 38
-        elif column in {"url", "source_file"}:
+        elif column in {"url", "source_file", "alternate_urls"}:
             width = 28
         elif column in {"latest_iptu_file", "latest_itbi_file", "sites", "neighborhoods"}:
             width = 38
-        elif column in {"sha256", "source"}:
+        elif column in {"sha256", "source", "area_warning"}:
             width = 24
-        elif column in {"neighborhood", "requested_neighborhood", "generated_at", "collected_at"}:
+        elif column in {"neighborhood", "requested_neighborhood", "generated_at", "collected_at", "collected_date"}:
             width = 22
         fmt = None
         if column in {
-            "price", "condominium", "advertised_iptu", "itbi_m2_mean", "itbi_m2_median",
+            "price", "min_advertised_price", "conservative_ref_m2", "condominium", "advertised_iptu",
+            "itbi_m2_mean", "itbi_m2_median",
             "itbi_m2_neighborhood_mean", "itbi_m2_neighborhood_pattern_mean",
             "itbi_m2_neighborhood_median", "itbi_m2_neighborhood_pattern_median",
             "listing_m2_neighborhood_mean", "listing_m2_neighborhood_pattern_mean",

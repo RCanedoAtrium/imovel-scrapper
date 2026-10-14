@@ -58,7 +58,28 @@ const moneyAfter = (text, labels) => {
 };
 const cardMetadata = (card, options = {}) => {
     const allText = readText(card) + ' ' + (card.getAttribute('title') || '');
-    const area = firstText(card, options.areaSelectors) || ((allText.match(/\d+(?:[.,]\d+)?\s*m[²2]/i) || [''])[0]);
+    let area = '';
+    const explicitAreas = [];
+    for (const selector of options.areaSelectors || []) {
+        card.querySelectorAll(selector).forEach(el => {
+            const txt = readText(el);
+            if (txt) explicitAreas.push(txt);
+        });
+    }
+    const utilCandidate = explicitAreas.find(txt => /m[²2]\s*(?:[úu]til|privativ)/i.test(txt));
+    const cleanCandidate = explicitAreas.find(txt => /m[²2]/i.test(txt) && !/tot|terreno/i.test(txt));
+    if (utilCandidate) {
+        area = utilCandidate;
+    } else if (cleanCandidate) {
+        area = cleanCandidate;
+    } else if (explicitAreas.length > 0) {
+        area = explicitAreas[0];
+    } else {
+        const utilMatch = allText.match(/\d+(?:[.,]\d+)?\s*m[²2]\s*(?:[úu]til|privativ)/i);
+        const cleanMatch = allText.match(/\d+(?:[.,]\d+)?\s*m[²2](?!\s*tot)/i);
+        const anyMatch = allText.match(/\d+(?:[.,]\d+)?\s*m[²2]/i);
+        area = utilMatch ? utilMatch[0] : (cleanMatch ? cleanMatch[0] : (anyMatch ? anyMatch[0] : ''));
+    }
     const condominiumText = firstText(card, options.condominiumSelectors);
     const iptuText = firstText(card, options.iptuSelectors);
     return {
@@ -776,7 +797,7 @@ class CrawleeScraper:
                     f"Imovelweb did not render listing cards for {neighborhood}"
                 ) from e
 
-            listings = await page.evaluate(CARD_METADATA_HELPERS + """
+            listings = await page.evaluate(CARD_METADATA_HELPERS + r"""
                 () => {
                     const cards = document.querySelectorAll('div[class*="postingCardLayout-module__posting-card-container"]');
                     const results = [];
@@ -788,8 +809,14 @@ class CrawleeScraper:
                         const price = priceEl ? priceEl.textContent.trim() : '';
                         
                         const featuresEl = card.querySelector('[data-qa="POSTING_CARD_FEATURES"]');
-                        const areaEl = featuresEl ? featuresEl.querySelector('span') : null;
-                        const area = areaEl ? areaEl.textContent.trim() : '';
+                        let area = '';
+                        if (featuresEl) {
+                            const spans = Array.from(featuresEl.querySelectorAll('span')).map(readText);
+                            const utilSpan = spans.find(s => /m[²2]\s*(?:[úu]til|privativ)/i.test(s));
+                            const cleanSpan = spans.find(s => /m[²2]/i.test(s) && !/tot|terreno/i.test(s));
+                            const anySpan = spans.find(s => /m[²2]/i.test(s));
+                            area = utilSpan || cleanSpan || anySpan || '';
+                        }
                         const locationEl = card.querySelector('[data-qa="POSTING_CARD_LOCATION"]');
                         const location = locationEl ? locationEl.textContent.trim() : '';
                         const addressCandidates = Array.from(

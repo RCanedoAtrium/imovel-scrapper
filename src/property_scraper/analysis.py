@@ -9,6 +9,9 @@ from .normalization import normalize_neighborhood, normalize_number, normalize_s
 from .pattern_model import RandomForestPatternModel, VALID_PATTERNS
 from .storage import read_csv_auto, write_dataset
 
+# Area warnings that need IPTU confirmation before a listing can be ranked.
+DOUBTFUL_AREA_WARNINGS = frozenset({"area_mismatch_warning", "area_total_only"})
+
 
 def _unique_cep_map(reference: pd.DataFrame, keys: list[str]) -> dict[tuple[str, ...], str]:
     usable = reference.copy()
@@ -156,6 +159,179 @@ class PatternClassifier:
         ]
 
 
+def deduplicate_physical_properties(df: pd.DataFrame) -> pd.DataFrame:
+    """Group duplicate listings of the same physical unit across brokers and portals.
+
+    Election rule:
+    - The most recent listing (by collected_at / collected_date) is elected canonical.
+    - Metadata added: duplicate_count, min_advertised_price, alternate_urls.
+    - Missing street/parking information is enriched from other brokers in the cluster.
+    - The lowest advertised price qualifies the physical property if it meets the criteria.
+    """
+    if df.empty:
+        return df
+
+    records = df.to_dict("records")
+    records.sort(
+        key=lambda r: (str(r.get("collected_at", "")), str(r.get("collected_date", ""))),
+        reverse=True,
+    )
+
+    by_neigh: dict[str, list[dict[str, object]]] = {}
+    for item in records:
+        neigh = str(item.get("neighborhood", "")).strip().upper()
+        by_neigh.setdefault(neigh, []).append(item)
+
+    clusters: list[list[dict[str, object]]] = []
+    for _, neigh_records in by_neigh.items():
+        neigh_clusters: list[list[dict[str, object]]] = []
+        for item in neigh_records:
+            street = str(item.get("street", "")).strip().upper()
+            bedrooms = float(item.get("bedrooms", 0) or 0)
+            area = float(item.get("area_m2", 0) or 0)
+            price = float(item.get("price", 0) or 0)
+
+            matched_cluster = None
+            for cluster in neigh_clusters:
+                rep = cluster[0]
+                r_street = str(rep.get("street", "")).strip().upper()
+                r_bedrooms = float(rep.get("bedrooms", 0) or 0)
+                r_area = float(rep.get("area_m2", 0) or 0)
+                r_price = float(rep.get("price", 0) or 0)
+
+                if street and r_street and street != r_street:
+                    continue
+
+                # Bedrooms: allow +- 1 difference (common divergence when counting DCE/closet/reversivel)
+                if bedrooms > 0 and r_bedrooms > 0 and abs(bedrooms - r_bedrooms) > 1:
+                    continue
+
+                max_area = max(area, r_area)
+                if max_area > 0 and abs(area - r_area) / max_area > 0.06:
+                    continue
+
+                max_price = max(price, r_price)
+                if max_price > 0 and abs(price - r_price) / max_price > 0.08:
+                    continue
+
+                if not street and not r_street:
+                    if max_area > 0 and abs(area - r_area) / max_area > 0.03:
+                        continue
+                    if max_price > 0 and abs(price - r_price) / max_price > 0.03:
+                        continue
+
+                matched_cluster = cluster
+                break
+
+            if matched_cluster is not None:
+                matched_cluster.append(item)
+            else:
+                neigh_clusters.append([item])
+        clusters.extend(neigh_clusters)
+
+    output_rows: list[dict[str, object]] = []
+    for cluster in clusters:
+        rep = dict(cluster[0])
+
+        # Distinct concurrent ads (separate broker URLs or source/title/price keys).
+        # Snapshots of the exact same ad over multiple dates do not count as duplicates.
+        unique_ads: set[object] = set()
+        for it in cluster:
+            u = str(it.get("url", "")).strip()
+            if u:
+                unique_ads.add(u)
+            else:
+                unique_ads.add((str(it.get("source", "")), str(it.get("title", "")), float(it.get("price", 0) or 0)))
+        duplicate_count = max(1, len(unique_ads))
+
+        if not rep.get("street"):
+            for it in cluster:
+                if it.get("street"):
+                    rep["street"] = it["street"]
+                    if it.get("number"):
+                        rep["number"] = it["number"]
+                    break
+
+        if rep.get("parking_review_status") != "approved":
+            for it in cluster:
+                if it.get("parking_review_status") == "approved":
+                    rep["parking_review_status"] = "approved"
+                    rep["parking_type"] = it.get("parking_type", rep.get("parking_type"))
+                    rep["parking_evidence"] = it.get("parking_evidence", rep.get("parking_evidence"))
+                    rep["parking_confidence"] = it.get("parking_confidence", rep.get("parking_confidence"))
+                    if float(rep.get("parking_spaces", 0) or 0) <= 0 and float(it.get("parking_spaces", 0) or 0) > 0:
+                        rep["parking_spaces"] = it.get("parking_spaces")
+                    break
+
+        prices = [float(it.get("price", 0) or 0) for it in cluster if float(it.get("price", 0) or 0) > 0]
+        min_price = min(prices) if prices else float(rep.get("price", 0) or 0)
+        rep_url = str(rep.get("url", "")).strip()
+        seen_urls: list[str] = []
+        for it in cluster:
+            u = str(it.get("url", "")).strip()
+            if u and u != rep_url and u not in seen_urls:
+                seen_urls.append(u)
+
+        rep["duplicate_count"] = duplicate_count
+        rep["min_advertised_price"] = min_price
+        rep["alternate_urls"] = ", ".join(seen_urls)
+
+        # Re-evaluate discount if a competing broker advertised a lower price
+        area = float(rep.get("area_m2", 0) or 0)
+        conservative_ref = float(rep.get("conservative_ref_m2", 0) or 0)
+        if min_price > 0 and min_price < float(rep.get("price", 0) or 0) and area > 0 and conservative_ref > 0:
+            effective_price_m2 = min_price / area
+            effective_discount = (conservative_ref - effective_price_m2) / conservative_ref
+            if effective_discount > float(rep.get("discount_vs_conservative_ref", 0) or 0):
+                rep["discount_vs_conservative_ref"] = effective_discount
+                mean_m2 = float(rep.get("itbi_m2_neighborhood_mean", 0) or 0)
+                if mean_m2 > 0:
+                    rep["discount_vs_neighborhood_mean"] = (mean_m2 - effective_price_m2) / mean_m2
+                    rep["discount_vs_mean"] = rep["discount_vs_neighborhood_mean"]
+                pat_mean_m2 = float(rep.get("itbi_m2_neighborhood_pattern_mean", 0) or 0)
+                if pat_mean_m2 > 0:
+                    rep["discount_vs_neighborhood_pattern_mean"] = (pat_mean_m2 - effective_price_m2) / pat_mean_m2
+
+        # Check if any broker ad qualified the physical property
+        if rep.get("opportunity_status") not in {"confirmed", "estimated"}:
+            for it in cluster:
+                if it.get("opportunity_status") in {"confirmed", "estimated"}:
+                    rep["opportunity_status"] = it.get("opportunity_status")
+                    if "conservative_discount" not in str(rep.get("opportunity_criteria", "")):
+                        criteria = [c for c in str(rep.get("opportunity_criteria", "")).split(",") if c]
+                        criteria.insert(0, "conservative_discount")
+                        rep["opportunity_criteria"] = ",".join(criteria)
+                    break
+
+        # Re-evaluate ranking status with final opportunity status & parking
+        opp_status = rep.get("opportunity_status")
+        review_status = str(rep.get("parking_review_status", "pending_review"))
+        has_parking = float(rep.get("parking_spaces", 0) or 0) >= 1 or review_status == "approved"
+        if opp_status not in {"confirmed", "estimated"}:
+            rep["ranking_status"] = "not_qualified"
+            rep["ranking_priority"] = 0
+        elif review_status == "rejected":
+            rep["ranking_status"] = "parking_excluded"
+            rep["ranking_priority"] = 1
+            rep["parking_exclusion_reason"] = str(rep.get("parking_type", "") or "rejected")
+        elif not has_parking:
+            rep["ranking_status"] = "parking_excluded"
+            rep["ranking_priority"] = 1
+            rep["parking_exclusion_reason"] = "no_parking_space"
+        elif review_status == "approved":
+            rep["ranking_status"] = "parking_eligible"
+            rep["ranking_priority"] = 3
+            rep["parking_exclusion_reason"] = ""
+        else:
+            rep["ranking_status"] = "parking_pending_review"
+            rep["ranking_priority"] = 2
+            rep["parking_exclusion_reason"] = ""
+
+        output_rows.append(rep)
+
+    return pd.DataFrame(output_rows)
+
+
 def analyze(settings: Settings, classifier_mode: str | None = None, discount_threshold: float | None = None) -> StageResult:
     paths = settings.paths.processed
     required = [
@@ -204,6 +380,8 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         confidence = 0.0
         method = ""
         building_year = 0
+        area_warning = str(listing.get("area_warning", "") or "")
+        area_val = float(listing.get("area_m2", 0) or 0)
         if matched is not None and str(matched.get("finish_pattern", "")) in VALID_PATTERNS:
             pattern = str(matched["finish_pattern"])
             confidence = 1.0 if evidence == "confirmed" else 0.85
@@ -218,6 +396,24 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
                     float(listing["area_m2"]), float(listing["price_m2"]),
                 )
             evidence = "estimated"
+
+        # The street+neighborhood+area match is chosen *by* area, so it cannot
+        # confirm the area. Only address matches (CEP/street + number) can.
+        address_match = matched is not None and match_reason != "street+neighborhood+area"
+        area_in_iptu_range = False
+        if matched is not None:
+            b_min = float(matched.get("area_min", 0) or 0)
+            b_max = float(matched.get("area_max", 0) or 0)
+            if b_min > 0 and b_max > 0:
+                area_in_iptu_range = b_min <= area_val <= b_max
+                if not area_in_iptu_range and area_val > b_max * 1.5:
+                    area_warning = "area_mismatch_warning"
+        if area_warning in DOUBTFUL_AREA_WARNINGS:
+            if address_match and area_in_iptu_range:
+                area_warning = "area_confirmed_by_iptu"
+            elif area_warning == "area_total_only":
+                area_warning = "area_unverified"
+
         neighborhood = str(listing["neighborhood"])
         reference = stats_index.get(neighborhood, {})
         mean_m2 = float(reference.get("itbi_m2_mean", 0) or 0)
@@ -235,29 +431,57 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         discount_median = (median_m2 - float(listing["price_m2"])) / median_m2 if median_m2 else 0.0
         p3_median = float(p3_medians.get(neighborhood, 0) or 0)
         pattern_arbitrage = pattern == "P5" and p3_median > 0 and float(listing["price_m2"]) <= p3_median * 1.15
-        discount_neighborhood_opportunity = mean_m2 > 0 and discount_mean >= threshold
-        discount_pattern_opportunity = pattern_mean_m2 > 0 and discount_pattern_mean >= threshold
+        if pattern_mean_m2 > 0 and mean_m2 > 0:
+            conservative_ref_m2 = min(pattern_mean_m2, mean_m2)
+        else:
+            conservative_ref_m2 = pattern_mean_m2 or mean_m2
+
+        discount_conservative = (
+            (conservative_ref_m2 - float(listing["price_m2"])) / conservative_ref_m2
+            if conservative_ref_m2 else 0.0
+        )
+        # GEMINI.md §4: only the conservative reference qualifies a listing.
+        # The remaining criteria are kept as explanatory tags.
+        qualifies = conservative_ref_m2 > 0 and discount_conservative >= threshold
         criteria = []
-        if discount_neighborhood_opportunity:
+        if qualifies:
+            criteria.append("conservative_discount")
+        if mean_m2 > 0 and discount_mean >= threshold:
             criteria.append("neighborhood_discount")
-        if discount_pattern_opportunity:
+        if pattern_mean_m2 > 0 and discount_pattern_mean >= threshold:
             criteria.append("neighborhood_pattern_discount")
         if pattern_arbitrage:
             criteria.append("finish_pattern_arbitrage")
-        if criteria:
+
+        has_unverified_area = area_warning in DOUBTFUL_AREA_WARNINGS | {"area_unverified"}
+        if qualifies and not has_unverified_area:
             opportunity_status = "confirmed" if evidence in {"confirmed", "likely"} else "estimated"
+        elif qualifies and has_unverified_area:
+            opportunity_status = "unverified_area"
         else:
             opportunity_status = "not_qualified"
+
+        # GEMINI.md §4: the main ranking requires at least one garage space,
+        # either from the structured count or from explicit text evidence.
         parking_review_status = str(listing.get("parking_review_status", "pending_review"))
-        if not criteria:
+        has_parking_space = (
+            float(listing.get("parking_spaces", 0) or 0) >= 1 or parking_review_status == "approved"
+        )
+        parking_exclusion_reason = ""
+        if opportunity_status not in {"confirmed", "estimated"}:
             ranking_status = "not_qualified"
             ranking_priority = 0
-        elif parking_review_status == "approved":
-            ranking_status = "parking_eligible"
-            ranking_priority = 3
         elif parking_review_status == "rejected":
             ranking_status = "parking_excluded"
             ranking_priority = 1
+            parking_exclusion_reason = str(listing.get("parking_type", "") or "rejected")
+        elif not has_parking_space:
+            ranking_status = "parking_excluded"
+            ranking_priority = 1
+            parking_exclusion_reason = "no_parking_space"
+        elif parking_review_status == "approved":
+            ranking_status = "parking_eligible"
+            ranking_priority = 3
         else:
             ranking_status = "parking_pending_review"
             ranking_priority = 2
@@ -277,17 +501,22 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             "itbi_m2_neighborhood_median": median_m2,
             "itbi_neighborhood_sales_count": sales_count,
             "itbi_m2_neighborhood_pattern_median": pattern_median_m2,
+            "conservative_ref_m2": conservative_ref_m2,
             "discount_vs_neighborhood_mean": discount_mean,
             "discount_vs_neighborhood_pattern_mean": discount_pattern_mean,
+            "discount_vs_conservative_ref": discount_conservative,
             "discount_vs_mean": discount_mean,
             "discount_vs_median": discount_median,
             "opportunity_criteria": ",".join(criteria),
             "opportunity_status": opportunity_status,
             "ranking_status": ranking_status,
             "ranking_priority": ranking_priority,
+            "parking_exclusion_reason": parking_exclusion_reason,
+            "area_warning": area_warning,
         })
         output.append(record)
-    analysis = pd.DataFrame(output)
+    raw_analysis = pd.DataFrame(output)
+    analysis = deduplicate_physical_properties(raw_analysis)
     analysis["listing_m2_neighborhood_pattern_mean"] = analysis.groupby(
         ["neighborhood", "finish_pattern"]
     )["price_m2"].transform("mean")
@@ -295,6 +524,7 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
     metric_columns = [
         "itbi_m2_neighborhood_mean",
         "itbi_m2_neighborhood_pattern_mean",
+        "conservative_ref_m2",
         "listing_m2_neighborhood_mean",
         "listing_m2_neighborhood_pattern_mean",
         "itbi_m2_neighborhood_median",
@@ -302,10 +532,11 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         "itbi_m2_neighborhood_pattern_median",
     ]
     leading_columns = [
-        "source", "source_file", "collected_at", "listing_age_days", "requested_neighborhood",
+        "source", "source_file", "collected_at", "collected_date", "listing_age_days", "requested_neighborhood",
         "cep", "cep_original", "cep_inference_method", "evidence_level", "match_reason",
         "classification_method", "classification_confidence", "classifier_version",
         "opportunity_criteria", "opportunity_status", "ranking_status", "ranking_priority",
+        "duplicate_count", "min_advertised_price", "alternate_urls", "area_warning",
         "neighborhood_method", "title", "url",
         "neighborhood", "price", "area_m2", "price_m2", "bedrooms", "bathrooms",
         "parking_spaces", "parking_type", "parking_evidence", "parking_confidence",
@@ -315,7 +546,7 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
     remaining_columns = [column for column in analysis.columns if column not in leading_columns + metric_columns]
     analysis = analysis[leading_columns + metric_columns + remaining_columns]
     analysis.sort_values(
-        by=["ranking_priority", "discount_vs_mean"], ascending=[False, False], inplace=True
+        by=["ranking_priority", "discount_vs_conservative_ref"], ascending=[False, False], inplace=True
     )
     path, manifest = write_dataset(
         analysis,
@@ -335,13 +566,17 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             },
         },
     )
+    duplicate_merged = int((analysis["duplicate_count"] - 1).sum()) if "duplicate_count" in analysis else 0
     return StageResult(
         stage="analyze",
         artifacts=[str(path), str(manifest)],
         counts={
-            "listings": len(analysis),
+            "listings_input": len(raw_analysis),
+            "physical_properties": len(analysis),
+            "duplicate_listings_merged": duplicate_merged,
             "confirmed_opportunities": int((analysis["opportunity_status"] == "confirmed").sum()),
             "estimated_opportunities": int((analysis["opportunity_status"] == "estimated").sum()),
+            "unverified_area_listings": int((analysis["opportunity_status"] == "unverified_area").sum()),
             "confirmed_matches": int((analysis["evidence_level"] == "confirmed").sum()),
         },
         details={
@@ -350,3 +585,4 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             "model": classifier.metadata,
         },
     )
+

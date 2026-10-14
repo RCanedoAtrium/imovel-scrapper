@@ -12,6 +12,11 @@ DEFAULT_NEIGHBORHOODS = [
     "LOURDES", "FUNCIONARIOS", "ANCHIETA", "BOA VIAGEM", "SANTA LUCIA", "CARMO", "SION", "SERRA",
 ]
 
+# Promoted cards from these regions leak into target searches (GEMINI.md §3).
+DEFAULT_EXCLUDED_REGIONS = [
+    "RIBEIRAO DAS NEVES", "SANTA MONICA", "BARREIRO", "BETIM", "CONTAGEM",
+]
+
 
 @dataclass(frozen=True)
 class Paths:
@@ -62,6 +67,7 @@ class Settings:
     api_base_url: str = "https://dados.pbh.gov.br/api/3/action"
     iptu_dataset: str = "cadastro-imobiliario-regional-centro-sul"
     itbi_dataset: str = "itbi-relatorios"
+    excluded_regions: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDED_REGIONS))
 
 
 def load_settings(config_path: str | Path = "config.json") -> Settings:
@@ -102,6 +108,7 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         api_base_url=str(pbh.get("api_base_url", "https://dados.pbh.gov.br/api/3/action")),
         iptu_dataset=str(pbh.get("iptu_dataset", "cadastro-imobiliario-regional-centro-sul")),
         itbi_dataset=str(pbh.get("itbi_dataset", "itbi-relatorios")),
+        excluded_regions=list(raw.get("excluded_regions", DEFAULT_EXCLUDED_REGIONS)),
     )
     settings.paths.ensure()
     return settings
