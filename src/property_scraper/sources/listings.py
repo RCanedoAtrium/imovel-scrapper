@@ -32,7 +32,26 @@ class ListingCollector:
         neighborhoods: list[str] | None = None,
         base_run_id: str | None = None,
         scraper_factory: type | None = None,
+        retry_failed: bool = False,
     ) -> StageResult:
+        if retry_failed and base_run_id is None:
+            latest = self.settings.paths.listings / "latest.txt"
+            if not latest.exists():
+                raise SourceError("No previous run found to retry failed pages.")
+            base_run_id = latest.read_text(encoding="utf-8").strip()
+            prev_dir = self.settings.paths.listings / base_run_id
+            failed_json = prev_dir / "failed_pages.json"
+            if failed_json.exists():
+                failed_data = json.loads(failed_json.read_text(encoding="utf-8"))
+                if not sites:
+                    sites = sorted(
+                        list({self._canonical_site(p.get("site", "")) for p in failed_data if p.get("site")})
+                    )
+                if not neighborhoods:
+                    neighborhoods = sorted(
+                        list({p.get("neighborhood", "").upper() for p in failed_data if p.get("neighborhood")})
+                    )
+
         chosen = [site.lower() for site in (sites or self.settings.sites)]
         invalid = sorted(set(chosen).difference(SUPPORTED_SITES))
         if invalid:
@@ -92,9 +111,7 @@ class ListingCollector:
             scraper_stats = getattr(scraper, "pagination_stats", [])
             contract_items = [item for item in (items or []) if self._is_valid_item(item)]
             for site in chosen:
-                portal_items = [
-                    item for item in contract_items if self._canonical_site(item.get("site")) == site
-                ]
+                portal_items = [item for item in contract_items if self._canonical_site(item.get("site")) == site]
                 if not portal_items:
                     if base_dir is not None and (base_dir / f"{site}.csv").exists():
                         previous = base_dir / f"{site}.csv"
@@ -112,10 +129,7 @@ class ListingCollector:
                         failures.append(f"{site}: no valid listings returned")
                     continue
                 site_items = [item for item in portal_items if self._matches_price_filter(item, filters)]
-                rejected_by_price += sum(
-                    not self._matches_price_filter(item, filters)
-                    for item in portal_items
-                )
+                rejected_by_price += sum(not self._matches_price_filter(item, filters) for item in portal_items)
                 existing = pd.DataFrame(columns=RAW_LISTING_COLUMNS)
                 if base_dir is not None:
                     previous = base_dir / f"{site}.csv"
@@ -147,6 +161,15 @@ class ListingCollector:
                 encoding="utf-8",
             )
             artifacts.append(str(pagination_path))
+            failed_pages = getattr(scraper, "failed_pages", [])
+            retry_stats = getattr(scraper, "retry_stats", {})
+            if failed_pages:
+                failed_path = run_dir / "failed_pages.json"
+                failed_path.write_text(
+                    json.dumps(failed_pages, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                artifacts.append(str(failed_path))
         except Exception as exc:
             failures.append(f"crawler: {exc}")
             for site in chosen:
@@ -197,9 +220,9 @@ class ListingCollector:
                 "min_pages_per_neighborhood": min(self.settings.min_pages_per_neighborhood, pages),
                 "min_new_listings_per_page": self.settings.min_new_listings_per_page,
                 "pages_crawled": len(scraper_stats),
-                "queries_crawled": len({
-                    (row["site"], row["neighborhood"]) for row in scraper_stats
-                }),
+                "retry_stats": retry_stats if "retry_stats" in locals() else {},
+                "failed_pages_count": len(failed_pages) if "failed_pages" in locals() else 0,
+                "queries_crawled": len({(row["site"], row["neighborhood"]) for row in scraper_stats}),
                 "max_price": ceiling,
                 "rejected_by_price": rejected_by_price,
                 "portal_status": portal_status,

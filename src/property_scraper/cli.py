@@ -29,9 +29,16 @@ def build_parser() -> argparse.ArgumentParser:
     scrape.add_argument("--pages", type=int, help="Pages per neighborhood")
     scrape.add_argument("--max-price", type=float, help="Global price cap applied to every neighborhood")
     scrape.add_argument("--neighborhoods", help="Comma-separated neighborhoods for an incremental collection")
-    scrape.add_argument("--append-latest", action="store_true", help="Merge collection into the latest run without repeating its neighborhoods")
+    scrape.add_argument(
+        "--append-latest",
+        action="store_true",
+        help="Merge collection into the latest run without repeating its neighborhoods",
+    )
+    scrape.add_argument("--retry-failed", action="store_true", help="Retry failed pages from the latest run")
 
-    validate = commands.add_parser("validate-cards", help="Validate extracted card fields without changing production data")
+    validate = commands.add_parser(
+        "validate-cards", help="Validate extracted card fields without changing production data"
+    )
     validate.add_argument("--neighborhood", default="BELVEDERE")
     validate.add_argument("--max-price", type=float, default=800000)
     validate.add_argument("--pages", type=int, default=4)
@@ -47,7 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     report = commands.add_parser("report", help="Generate the Excel report")
     report.add_argument("--run-id", default="manual")
 
-    alerts_parser = commands.add_parser("alerts", help="Generate notification alerts for new opportunities and price drops")
+    alerts_parser = commands.add_parser(
+        "alerts", help="Generate notification alerts for new opportunities and price drops"
+    )
     alerts_parser.add_argument("--markdown", action="store_true", help="Print only markdown digest to stdout")
 
     run = commands.add_parser("run", help="Run every pipeline stage")
@@ -90,6 +99,7 @@ def execute(args: argparse.Namespace):
             max_price=args.max_price,
             neighborhoods=neighborhoods,
             base_run_id=base_run_id,
+            retry_failed=args.retry_failed,
         )
     if args.command == "validate-cards":
         sites = [site.strip() for site in args.sites.split(",")] if args.sites else None
@@ -126,6 +136,10 @@ def execute(args: argparse.Namespace):
 
 
 def main(argv: list[str] | None = None) -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

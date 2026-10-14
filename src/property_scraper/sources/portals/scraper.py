@@ -37,6 +37,8 @@ class CrawleeScraper:
         self.diagnostics_dir = Path(diagnostics_dir) if diagnostics_dir else Path("data/diagnostics")
         self.pagination_stats: list[dict[str, Any]] = []
         self._seen_by_query: dict[tuple[str, str], set[str]] = {}
+        self.failed_pages: list[dict[str, Any]] = []
+        self.retry_stats: dict[str, Any] = {}
 
         self.adapters: dict[str, BasePortalAdapter] = {
             "vivareal": GrupoOLXAdapter("vivareal", "VIVAREAL", "VivaReal"),
@@ -94,9 +96,9 @@ class CrawleeScraper:
         """Deduplicates a query page and decides whether adaptive pagination continues."""
         query_key = (self.slugify(site), self.slugify(neighborhood))
         seen = self._seen_by_query.setdefault(query_key, set())
-        limits = {
-            self.slugify(name): values for name, values in (price_filters or {}).items()
-        }.get(self.slugify(neighborhood), {})
+        limits = {self.slugify(name): values for name, values in (price_filters or {}).items()}.get(
+            self.slugify(neighborhood), {}
+        )
         minimum = float(limits.get("min", 0) or 0)
         maximum = float(limits.get("max", 0) or 0)
         new_items = []
@@ -106,9 +108,10 @@ class CrawleeScraper:
         for item in listings:
             link = str(item.get("link") or item.get("url") or "")
             parsed = urllib.parse.urlsplit(link)
-            identity = urllib.parse.urlunsplit(
-                (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", "")
-            ) or link
+            identity = (
+                urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", ""))
+                or link
+            )
             if not identity or identity in seen:
                 continue
             seen.add(identity)
@@ -140,19 +143,21 @@ class CrawleeScraper:
             continued = False
             stop_reason = "low_yield"
 
-        self.pagination_stats.append({
-            "site": site,
-            "neighborhood": neighborhood,
-            "page": page_number,
-            "raw_listings": len(listings),
-            "new_unique_listings": len(new_items),
-            "new_within_price": new_within_price,
-            "rejected_by_price": rejected_by_price,
-            "rejected_by_area": rejected_by_area,
-            "rejected_by_location": rejected_by_location,
-            "continued": continued,
-            "decision": stop_reason,
-        })
+        self.pagination_stats.append(
+            {
+                "site": site,
+                "neighborhood": neighborhood,
+                "page": page_number,
+                "raw_listings": len(listings),
+                "new_unique_listings": len(new_items),
+                "new_within_price": new_within_price,
+                "rejected_by_price": rejected_by_price,
+                "rejected_by_area": rejected_by_area,
+                "rejected_by_location": rejected_by_location,
+                "continued": continued,
+                "decision": stop_reason,
+            }
+        )
         return new_items, continued
 
     def generate_start_urls(
@@ -164,9 +169,7 @@ class CrawleeScraper:
         """Generates search URLs for a list of neighborhoods across multiple sites."""
         sites = sites or ["vivareal", "zap", "olx", "quintoandar", "imovelweb"]
         start_urls = []
-        normalized_filters = {
-            self.slugify(name): limits for name, limits in (price_filters or {}).items()
-        }
+        normalized_filters = {self.slugify(name): limits for name, limits in (price_filters or {}).items()}
         for neighborhood in neighborhoods:
             slug = self.slugify(neighborhood)
             if not slug:
@@ -176,11 +179,17 @@ class CrawleeScraper:
                 adapter = self.adapters.get(site_key.lower())
                 if adapter:
                     url = adapter.build_url(neighborhood, limits)
-                    start_urls.append({
-                        "url": url,
-                        "label": adapter.label,
-                        "userData": {"neighborhood": neighborhood, "site": adapter.display_name, "site_id": adapter.site_id},
-                    })
+                    start_urls.append(
+                        {
+                            "url": url,
+                            "label": adapter.label,
+                            "userData": {
+                                "neighborhood": neighborhood,
+                                "site": adapter.display_name,
+                                "site_id": adapter.site_id,
+                            },
+                        }
+                    )
         return start_urls
 
     async def _capture_screenshot(self, page: Any, prefix: str, neighborhood: str) -> None:
@@ -200,10 +209,14 @@ class CrawleeScraper:
         price_filters: dict[str, Any] | None = None,
         min_pages_per_bairro: int = 2,
         min_new_listings_per_page: int = 3,
+        retry_failed_pages: bool = True,
+        max_retry_passes: int = 2,
     ) -> list[dict[str, Any]]:
         """Asynchronously scrapes listings for the specified neighborhoods and sites."""
         self.pagination_stats = []
         self._seen_by_query = {}
+        self.failed_pages = []
+        self.retry_stats = {}
         start_urls = self.generate_start_urls(neighborhoods, sites, price_filters)
         if not start_urls:
             logger.warning("No neighborhood links were generated.")
@@ -219,7 +232,7 @@ class CrawleeScraper:
 
         crawler = PlaywrightCrawler(
             configuration=configuration,
-            max_requests_per_crawl=len(start_urls) * max_pages_per_bairro * 2,
+            max_requests_per_crawl=(len(start_urls) * max_pages_per_bairro * (max_retry_passes + 2)) + 50,
             max_request_retries=3,
             concurrency_settings=ConcurrencySettings(
                 min_concurrency=1,
@@ -297,9 +310,9 @@ class CrawleeScraper:
                 if should_continue:
                     next_url = adapter.build_next_page_url(url, current_page + 1)
                     if next_url:
-                        await context.add_requests([
-                            Request.from_url(url=next_url, label=adapter.label, user_data=user_data)
-                        ])
+                        await context.add_requests(
+                            [Request.from_url(url=next_url, label=adapter.label, user_data=user_data)]
+                        )
 
             return handler
 
@@ -359,12 +372,86 @@ class CrawleeScraper:
                     break
                 current_page += 1
 
+        failed_requests: list[dict[str, Any]] = []
+
+        @crawler.failed_request_handler
+        async def handle_failed_request(context: PlaywrightCrawlingContext, error: Exception) -> None:
+            user_data = dict(context.request.user_data or {})
+            site = user_data.get("site", "Unknown")
+            neighborhood = user_data.get("neighborhood", "Unknown")
+            context.log.warning(
+                f"Page failed permanently in current pass: [{site}] {neighborhood} -> {context.request.url} (error: {error})"
+            )
+            failed_requests.append(
+                {
+                    "url": str(context.request.url),
+                    "label": context.request.label,
+                    "userData": user_data,
+                    "site": site,
+                    "neighborhood": neighborhood,
+                    "error": str(error),
+                }
+            )
+
         requests = [
-            Request.from_url(url=item["url"], label=item["label"], user_data=item["userData"])
-            for item in start_urls
+            Request.from_url(url=item["url"], label=item["label"], user_data=item["userData"]) for item in start_urls
         ]
         try:
             await crawler.run(requests)
+
+            # Retry phase: re-attempt any pages that failed during the primary crawl
+            initial_failed_count = len(failed_requests)
+            retry_passes_executed = 0
+
+            if retry_failed_pages and failed_requests:
+                logger.info(
+                    f"Initial crawl finished with {initial_failed_count} failed page(s). "
+                    f"Starting post-crawl retry pass..."
+                )
+                retry_pass = 1
+                while failed_requests and retry_pass <= max_retry_passes:
+                    pages_to_retry = list(failed_requests)
+                    failed_requests.clear()
+                    retry_passes_executed += 1
+                    logger.info(
+                        f"[Post-Crawl Retry {retry_pass}/{max_retry_passes}] Retrying {len(pages_to_retry)} "
+                        f"failed page(s) after 5s pause..."
+                    )
+                    await asyncio.sleep(5)
+                    retry_requests = [
+                        Request.from_url(
+                            url=item["url"],
+                            label=item["label"],
+                            user_data=item["userData"],
+                        )
+                        for item in pages_to_retry
+                    ]
+                    await crawler.run(retry_requests)
+                    retry_pass += 1
+
+            self.failed_pages = list(failed_requests)
+            recovered_count = max(0, initial_failed_count - len(self.failed_pages)) if initial_failed_count > 0 else 0
+            if initial_failed_count > 0:
+                logger.info(
+                    f"Post-crawl retry summary: {initial_failed_count} initial failures, "
+                    f"{recovered_count} recovered, {len(self.failed_pages)} permanent failures."
+                )
+                if self.failed_pages:
+                    logger.warning(
+                        f"The following {len(self.failed_pages)} page(s) could not be retrieved even after retries: "
+                        + ", ".join(
+                            f"[{p.get('site')}] {p.get('neighborhood')}: {p.get('url')}" for p in self.failed_pages
+                        )
+                    )
+
+            self.retry_stats = {
+                "initial_failures": initial_failed_count,
+                "recovered": recovered_count,
+                "permanent_failures": len(self.failed_pages),
+                "retry_passes_executed": retry_passes_executed,
+                "failed_pages": self.failed_pages,
+            }
+
             results = await dataset.get_data()
             items = results.items
             logger.info(f"Scrape complete. Total listings collected by Crawlee: {len(items)}")
@@ -398,6 +485,8 @@ class CrawleeScraper:
         price_filters: dict[str, Any] | None = None,
         min_pages_per_bairro: int = 2,
         min_new_listings_per_page: int = 3,
+        retry_failed_pages: bool = True,
+        max_retry_passes: int = 2,
     ) -> list[dict[str, Any]]:
         """Wrapper method to run the async crawler synchronously."""
         return asyncio.run(
@@ -408,5 +497,7 @@ class CrawleeScraper:
                 price_filters,
                 min_pages_per_bairro,
                 min_new_listings_per_page,
+                retry_failed_pages=retry_failed_pages,
+                max_retry_passes=max_retry_passes,
             )
         )

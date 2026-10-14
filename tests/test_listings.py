@@ -20,9 +20,7 @@ class MockCrawler:
 
 
 def _make_listing(site, link, price="R$ 500.000", area="60 m²"):
-    return {
-        column: f"{column}-val" for column in RAW_LISTING_COLUMNS
-    } | {
+    return {column: f"{column}-val" for column in RAW_LISTING_COLUMNS} | {
         "site": site,
         "link": link,
         "url": link,
@@ -67,11 +65,13 @@ def test_collector_carries_over_prior_csv_when_portal_fails(project):
 
     base_dir = settings.paths.listings / "base_run"
     base_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([
-        _make_listing("imovelweb", "https://example.test/iw1"),
-        _make_listing("imovelweb", "https://example.test/iw2"),
-        _make_listing("imovelweb", "https://example.test/iw3"),
-    ]).to_csv(base_dir / "imovelweb.csv", index=False, sep=";", encoding="utf-8-sig")
+    pd.DataFrame(
+        [
+            _make_listing("imovelweb", "https://example.test/iw1"),
+            _make_listing("imovelweb", "https://example.test/iw2"),
+            _make_listing("imovelweb", "https://example.test/iw3"),
+        ]
+    ).to_csv(base_dir / "imovelweb.csv", index=False, sep=";", encoding="utf-8-sig")
 
     items = [
         _make_listing("vivareal", "https://example.test/vr1"),
@@ -112,3 +112,66 @@ def test_collector_total_failure_discards_run_and_raises_source_error(project):
 
     run_dir = settings.paths.listings / "run_fail_test"
     assert not run_dir.exists()
+
+
+def test_collector_saves_failed_pages_and_retry_stats(project):
+    import json
+
+    root, config_path = project
+    settings = load_settings(config_path)
+
+    items = [_make_listing("vivareal", "https://example.test/vr1")]
+    failed_mock = [{"url": "https://example.test/failed1", "site": "imovelweb", "neighborhood": "SAVASSI"}]
+    retry_stats_mock = {"initial_failures": 1, "recovered": 0, "permanent_failures": 1}
+
+    class MockCrawlerWithFailures(MockCrawler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.failed_pages = failed_mock
+            self.retry_stats = retry_stats_mock
+
+    collector = ListingCollector(settings)
+    result = collector.collect(
+        neighborhoods=["SAVASSI"],
+        sites=["vivareal"],
+        run_id="run_with_failures",
+        scraper_factory=lambda *args, **kwargs: MockCrawlerWithFailures(items=items),
+    )
+
+    run_dir = settings.paths.listings / "run_with_failures"
+    failed_file = run_dir / "failed_pages.json"
+    assert failed_file.exists()
+    data = json.loads(failed_file.read_text(encoding="utf-8"))
+    assert len(data) == 1
+    assert data[0]["site"] == "imovelweb"
+    assert result.details["failed_pages_count"] == 1
+    assert result.details["retry_stats"]["permanent_failures"] == 1
+
+
+def test_collector_retry_failed_from_previous_run(project):
+    import json
+
+    root, config_path = project
+    settings = load_settings(config_path)
+
+    # Setup a previous run with failed_pages.json
+    prev_dir = settings.paths.listings / "prev_run_id"
+    prev_dir.mkdir(parents=True, exist_ok=True)
+    (prev_dir / "failed_pages.json").write_text(
+        json.dumps([{"url": "https://example.test/fail", "site": "vivareal", "neighborhood": "SAVASSI"}]),
+        encoding="utf-8",
+    )
+    (settings.paths.listings / "latest.txt").write_text("prev_run_id", encoding="utf-8")
+
+    items = [_make_listing("vivareal", "https://example.test/vr_retry")]
+    collector = ListingCollector(settings)
+    result = collector.collect(
+        run_id="run_retry_success",
+        retry_failed=True,
+        scraper_factory=lambda *args, **kwargs: MockCrawler(items=items),
+    )
+
+    assert result.status == "success"
+    assert result.counts["vivareal"] == 1
+    assert result.details["base_run_id"] == "prev_run_id"
+    assert "SAVASSI" in result.details["neighborhoods_collected"]
