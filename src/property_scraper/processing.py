@@ -370,7 +370,8 @@ def prepare_listings(
     )
     combined = pd.concat([url_records, no_url_records], ignore_index=True)
     history_store = ListingHistoryStore(settings.paths.data / "history.db")
-    return history_store.record_observations(combined, now=now_utc)
+    retention = getattr(settings.rules, "history_retention_days", 180)
+    return history_store.record_observations(combined, now=now_utc, retention_days=retention)
 
 
 def prepare_reference_data(settings: Settings) -> StageResult:

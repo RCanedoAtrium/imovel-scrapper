@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +19,8 @@ class ListingHistoryStore:
         self._init_db()
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS listing_history (
                     portal TEXT NOT NULL,
@@ -44,12 +45,27 @@ class ListingHistoryStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_portal_id ON listing_history(portal, listing_id);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_price_drop ON listing_history(price_drop_pct);")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_neighborhood ON listing_history(neighborhood);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_hist_last_seen ON listing_history(last_seen);")
             conn.commit()
+
+    def prune_history(self, retention_days: int = 180, now: datetime | None = None) -> int:
+        """Prunes listing records that have not been seen in the last `retention_days`."""
+        if retention_days <= 0:
+            return 0
+        now_dt = now or datetime.now(timezone.utc)
+        cutoff_date = (now_dt - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM listing_history WHERE last_seen < ?", [cutoff_date])
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
 
     def record_observations(
         self,
         listings: pd.DataFrame,
         now: datetime | None = None,
+        retention_days: int = 180,
     ) -> pd.DataFrame:
         """Records observations of listings in SQLite and enriches the DataFrame with tracking columns."""
         if listings.empty:
@@ -59,21 +75,40 @@ class ListingHistoryStore:
         now_dt = now or datetime.now(timezone.utc)
         current_date_str = now_dt.strftime("%Y-%m-%d")
 
+        # Prune records older than retention threshold (GEMINI.md §3 / P3: 180 days)
+        self.prune_history(retention_days=retention_days, now=now_dt)
+
         if "listing_id" not in enriched.columns:
             enriched["listing_id"] = [
                 extract_listing_id(str(row.get("url", "")), str(row.get("source", "")))
                 for _, row in enriched.iterrows()
             ]
 
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
+            # Collect candidate keys
+            candidate_keys = []
+            for _, row in enriched.iterrows():
+                portal = str(row.get("source", "")).strip().lower()
+                lid = str(row.get("listing_id", "")).strip() or extract_listing_id(str(row.get("url", "")), portal)
+                candidate_keys.append((portal, lid))
+
+            # Query existing records in chunks to scale efficiently
             existing_records: dict[tuple[str, str], dict[str, Any]] = {}
-            cursor.execute("SELECT * FROM listing_history")
-            for row in cursor.fetchall():
-                key = (str(row["portal"]), str(row["listing_id"]))
-                existing_records[key] = dict(row)
+            unique_keys = list(set(candidate_keys))
+            chunk_size = 400
+            for i in range(0, len(unique_keys), chunk_size):
+                chunk = unique_keys[i : i + chunk_size]
+                placeholders = ",".join(["(?, ?)"] * len(chunk))
+                flat_params = [item for pair in chunk for item in pair]
+                cursor.execute(
+                    f"SELECT * FROM listing_history WHERE (portal, listing_id) IN (VALUES {placeholders})",
+                    flat_params,
+                )
+                for row in cursor.fetchall():
+                    existing_records[(str(row["portal"]), str(row["listing_id"]))] = dict(row)
 
             updates: list[tuple[Any, ...]] = []
             enriched_records: list[dict[str, Any]] = []

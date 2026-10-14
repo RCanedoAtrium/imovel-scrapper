@@ -44,6 +44,7 @@
     "pattern_arbitrage_multiplier": 1.15,
     "pattern_min_confidence": 0.50,
     "pattern_min_samples_leaf": 5,
-    "min_price_drop_pct": 0.03
+    "min_price_drop_pct": 0.03,
+    "history_retention_days": 180
   }
 }

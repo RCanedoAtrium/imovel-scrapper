@@ -249,3 +249,38 @@ def test_richer_ranking_carrying_costs_and_opportunity_score(tmp_path: Path):
     assert json_path.exists()
     assert md_path.exists()
     assert "ANCHIETA" in md_path.read_text(encoding="utf-8")
+
+
+def test_history_retention_pruning(tmp_path: Path):
+    from datetime import datetime, timezone
+
+    db_path = tmp_path / "history.db"
+    store = ListingHistoryStore(db_path)
+
+    # 1. Observation from 200 days ago
+    df_old = pd.DataFrame([{
+        "source": "vivareal",
+        "url": "https://www.vivareal.com.br/imovel/id-old-123/",
+        "neighborhood": "LOURDES",
+        "price": 600000.0,
+        "area_m2": 80.0,
+        "collected_date": "2026-01-01",
+    }])
+    store.record_observations(df_old, now=datetime(2026, 1, 1, tzinfo=timezone.utc), retention_days=180)
+    assert len(store.get_history()) == 1
+
+    # 2. Observation today (2026-08-01, 212 days later)
+    df_new = pd.DataFrame([{
+        "source": "vivareal",
+        "url": "https://www.vivareal.com.br/imovel/id-new-456/",
+        "neighborhood": "SAVASSI",
+        "price": 500000.0,
+        "area_m2": 70.0,
+        "collected_date": "2026-08-01",
+    }])
+    store.record_observations(df_new, now=datetime(2026, 8, 1, tzinfo=timezone.utc), retention_days=180)
+
+    # Old record (>180 days without new observation) should have been pruned
+    hist = store.get_history()
+    assert len(hist) == 1
+    assert hist.iloc[0]["listing_id"] == "id-new-456"

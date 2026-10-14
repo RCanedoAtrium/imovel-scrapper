@@ -61,6 +61,7 @@ class RulesSettings:
     pattern_min_confidence: float = 0.50
     pattern_min_samples_leaf: int = 5
     min_price_drop_pct: float = 0.03
+    history_retention_days: int = 180
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,7 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         pattern_min_confidence=float(rules_raw.get("pattern_min_confidence", 0.50)),
         pattern_min_samples_leaf=int(rules_raw.get("pattern_min_samples_leaf", 5)),
         min_price_drop_pct=float(rules_raw.get("min_price_drop_pct", 0.03)),
+        history_retention_days=int(rules_raw.get("history_retention_days", 180)),
     )
     settings = Settings(
         paths=Paths.from_root(root),
