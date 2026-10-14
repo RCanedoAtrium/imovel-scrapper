@@ -1,5 +1,6 @@
 pandas>=2.0.0
 xlsxwriter>=3.1.0
+openpyxl>=3.1.0
 playwright>=1.40.0
 crawlee[playwright]>=0.4.0
 requests>=2.31.0
