@@ -229,3 +229,47 @@ def parse_listing_address(title: str) -> tuple[str, str, str]:
     )
     street = normalize_street(" ".join(street_match.groups())) if street_match else ""
     return street, normalize_number(number), cep
+
+
+def extract_listing_id(url: str, site: str = "") -> str:
+    """Extracts numeric listing ID from URL, falling back to a deterministic slug."""
+    if not isinstance(url, str) or not url.strip():
+        return ""
+    clean_site = site.lower().strip()
+    if "imovelweb" in clean_site:
+        match = re.search(r"(?:-|/)(\d{9,11})\.html", url)
+        if match:
+            return match.group(1)
+    elif "olx" in clean_site:
+        match = re.search(r"(?:-|/)(\d{9,11})(?:$|\?|/)", url)
+        if match:
+            return match.group(1)
+    elif any(s in clean_site for s in ("vivareal", "zap")):
+        match = re.search(r"(?:id-|codigo-|/|#)(\d{7,12})(?:/|$|\?)", url)
+        if match:
+            return match.group(1)
+    elif "quintoandar" in clean_site:
+        match = re.search(r"/imovel/(\d+)", url)
+        if match:
+            return match.group(1)
+
+    match = re.search(r"(?:id-|codigo-|-|/)(\d{7,12})(?:\.html|/|$|\?)", url)
+    if match:
+        return match.group(1)
+
+    path = re.sub(r"[?#].*$", "", url).strip().rstrip("/")
+    slug = path.split("/")[-1] if "/" in path else path
+    return re.sub(r"[^\w-]", "", slug)[:32]
+
+
+def is_legacy_listing(listing_id: str, site: str = "") -> bool:
+    """Checks if a listing has a known legacy sequence ID (GEMINI.md §3)."""
+    if not listing_id or not listing_id.isdigit():
+        return False
+    clean_site = site.lower().strip()
+    numeric_id = int(listing_id)
+    if "imovelweb" in clean_site and numeric_id < 3_015_000_000:
+        return True
+    if "olx" in clean_site and numeric_id < 1_450_000_000:
+        return True
+    return False

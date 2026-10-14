@@ -9,7 +9,7 @@ from .analysis import analyze
 from .card_validation import validate_cards
 from .config import load_settings
 from .errors import PipelineError
-from .orchestrator import run_pipeline
+from .orchestrator import generate_pipeline_alerts, run_pipeline
 from .processing import prepare_all
 from .reporting import generate_report
 from .sources.listings import ListingCollector
@@ -47,6 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
     report = commands.add_parser("report", help="Generate the Excel report")
     report.add_argument("--run-id", default="manual")
 
+    alerts_parser = commands.add_parser("alerts", help="Generate notification alerts for new opportunities and price drops")
+    alerts_parser.add_argument("--markdown", action="store_true", help="Print only markdown digest to stdout")
+
     run = commands.add_parser("run", help="Run every pipeline stage")
     run.add_argument("--force-sync", action="store_true")
     run.add_argument(
@@ -60,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use the latest local listing run without accessing the portals",
     )
     run.add_argument("--report", action="store_true", help="Also generate the Excel report")
+    run.add_argument("--alert", action="store_true", help="Also generate notification alerts")
     return parser
 
 
@@ -103,6 +107,11 @@ def execute(args: argparse.Namespace):
         return analyze(settings, classifier_mode=args.classifier, discount_threshold=args.discount)
     if args.command == "report":
         return generate_report(settings, run_id=args.run_id)
+    if args.command == "alerts":
+        res = generate_pipeline_alerts(settings)
+        if getattr(args, "markdown", False):
+            print(res.details.get("markdown_digest", ""))
+        return res
     if args.command == "run":
         return run_pipeline(
             settings,
@@ -110,6 +119,7 @@ def execute(args: argparse.Namespace):
             sync_reference=not args.skip_reference_sync,
             scrape=not args.skip_scrape,
             report=args.report,
+            alert=args.alert,
         )
     parser_error = f"Unknown command: {args.command}"
     raise PipelineError(parser_error)

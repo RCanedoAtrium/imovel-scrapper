@@ -9,14 +9,17 @@ import pandas as pd
 
 from .config import Settings
 from .errors import DataQualityError
+from .history import ListingHistoryStore
 from .models import StageResult
 from .normalization import (
     clean_numeric,
     detect_area_warning,
     extract_area_m2,
     extract_currency,
+    extract_listing_id,
     extract_nested,
     find_excluded_region,
+    is_legacy_listing,
     normalize_cep,
     normalize_column_name,
     normalize_neighborhood,
@@ -293,6 +296,11 @@ def prepare_listings(
                     neighborhood_value = neighborhood_value.get("name", neighborhood_value.get("neighborhood", ""))
                 source_site = str(extract_nested(source, ["site", "source"]) or path.stem)
                 link = _canonical_url(extract_nested(source, ["url", "link", "listing.url", "listing.link"]), site=source_site)
+                listing_id = str(extract_nested(source, ["listing_id", "id", "listing.id"]) or "").strip()
+                if not listing_id:
+                    listing_id = extract_listing_id(link, site=source_site)
+                if is_legacy_listing(listing_id, site=source_site):
+                    continue
                 parsed_street, parsed_number, parsed_cep = parse_listing_address(title)
                 direct_street = extract_nested(source, ["street", "address.street", "listing.address.street"])
                 street = normalize_street(direct_street) if direct_street else parsed_street
@@ -324,6 +332,7 @@ def prepare_listings(
                 records.append({
                     "source": str(extract_nested(source, ["site", "source"]) or path.stem),
                     "source_file": str(path.relative_to(settings.paths.root)),
+                    "listing_id": listing_id,
                     "collected_at": collected_at,
                     "collected_date": collected_date,
                     "listing_age_days": age_days,
@@ -359,7 +368,9 @@ def prepare_listings(
     no_url_records = listings[~with_url].drop_duplicates(
         subset=["neighborhood", "street", "number", "area_m2", "price", "collected_date"], keep="last"
     )
-    return pd.concat([url_records, no_url_records], ignore_index=True)
+    combined = pd.concat([url_records, no_url_records], ignore_index=True)
+    history_store = ListingHistoryStore(settings.paths.data / "history.db")
+    return history_store.record_observations(combined, now=now_utc)
 
 
 def prepare_reference_data(settings: Settings) -> StageResult:

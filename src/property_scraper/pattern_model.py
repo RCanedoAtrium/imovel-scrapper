@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
@@ -66,6 +68,7 @@ class RandomForestPatternModel:
         self.frequent_streets = set(street_counts[street_counts >= STREET_THRESHOLD].index)
         train["street_model"] = train["street"].where(train["street"].isin(self.frequent_streets), RARE_STREET)
 
+        leaf_samples = max(1, min(5, len(train) // 4))
         preprocessor = ColumnTransformer(
             [
                 (
@@ -80,11 +83,39 @@ class RandomForestPatternModel:
             n_estimators=N_ESTIMATORS,
             random_state=RANDOM_SEED,
             class_weight="balanced_subsample",
-            min_samples_leaf=1,
+            min_samples_leaf=leaf_samples,
             max_features="sqrt",
             n_jobs=-1,
         )
         self.pipeline = Pipeline([("preprocessor", preprocessor), ("classifier", forest)])
+
+        # Cross-validation performance assessment
+        min_class_count = int(train["finish_pattern"].value_counts().min())
+        n_splits = min(5, min_class_count)
+        cv_accuracy = None
+        cv_f1_macro = None
+        per_class_f1 = {}
+        per_class_precision = {}
+        per_class_recall = {}
+        if n_splits >= 2:
+            skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_SEED)
+            cv_predictions = cross_val_predict(
+                self.pipeline,
+                train[self.feature_columns],
+                train["finish_pattern"],
+                cv=skf,
+                n_jobs=1,
+            )
+            cv_accuracy = float(accuracy_score(train["finish_pattern"], cv_predictions))
+            cv_f1_macro = float(f1_score(train["finish_pattern"], cv_predictions, average="macro", zero_division=0))
+            report = classification_report(train["finish_pattern"], cv_predictions, output_dict=True, zero_division=0)
+            for cls in sorted(train["finish_pattern"].unique()):
+                cls_str = str(cls)
+                if cls_str in report:
+                    per_class_f1[cls_str] = float(report[cls_str]["f1-score"])
+                    per_class_precision[cls_str] = float(report[cls_str]["precision"])
+                    per_class_recall[cls_str] = float(report[cls_str]["recall"])
+
         self.pipeline.fit(train[self.feature_columns], train["finish_pattern"])
         # Analysis predicts one listing at a time. Keeping a worker pool for a
         # single row adds overhead and emits one joblib warning per listing.
@@ -101,10 +132,15 @@ class RandomForestPatternModel:
             "frequent_streets": len(self.frequent_streets),
             "street_threshold": STREET_THRESHOLD,
             "n_estimators": N_ESTIMATORS,
-            "min_samples_leaf": 1,
+            "min_samples_leaf": leaf_samples,
             "max_features": "sqrt",
             "class_weight": "balanced_subsample",
             "random_seed": RANDOM_SEED,
+            "cv_accuracy": cv_accuracy,
+            "cv_f1_macro": cv_f1_macro,
+            "per_class_f1": per_class_f1,
+            "per_class_precision": per_class_precision,
+            "per_class_recall": per_class_recall,
         }
 
     def predict(self, neighborhood: object, street: object, area_m2: object) -> PatternPrediction:

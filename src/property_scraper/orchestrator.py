@@ -3,14 +3,16 @@ from __future__ import annotations
 import uuid
 from dataclasses import asdict
 
+from .alerts import generate_alerts, save_alerts
 from .analysis import analyze
 from .config import Settings
+from .errors import DataQualityError
 from .models import RunManifest, StageResult
 from .processing import prepare_all
 from .reporting import generate_report
 from .sources.listings import ListingCollector
 from .sources.pbh import PBHSynchronizer
-from .storage import atomic_json
+from .storage import atomic_json, read_dataset
 
 
 def collect_reference_data(settings: Settings, *, force: bool = False) -> StageResult:
@@ -29,6 +31,24 @@ def infer_patterns(settings: Settings) -> StageResult:
     return analyze(settings)
 
 
+def generate_pipeline_alerts(settings: Settings) -> StageResult:
+    analysis_path = settings.paths.processed / "analysis.csv"
+    if not analysis_path.exists():
+        raise DataQualityError("Run analyze before generating alerts")
+    analysis = read_dataset(analysis_path)
+    alerts = generate_alerts(analysis, settings)
+    json_path, md_path = save_alerts(alerts, settings)
+    return StageResult(
+        stage="alerts",
+        artifacts=[str(json_path), str(md_path)],
+        counts={
+            "new_opportunities": alerts["new_opportunities_count"],
+            "price_drops": alerts["price_drops_count"],
+        },
+        details={"markdown_digest": alerts["markdown_digest"]},
+    )
+
+
 def run_pipeline(
     settings: Settings,
     force_sync: bool = False,
@@ -36,6 +56,7 @@ def run_pipeline(
     sync_reference: bool = True,
     scrape: bool = True,
     report: bool = False,
+    alert: bool = False,
 ) -> StageResult:
     run_id = uuid.uuid4().hex[:12]
     manifest = RunManifest(
@@ -53,6 +74,7 @@ def run_pipeline(
             "sync_reference": sync_reference,
             "scrape": scrape,
             "report": report,
+            "alert": alert,
         },
     )
     manifest_path = settings.paths.reports / f"run_{run_id}.json"
@@ -66,6 +88,8 @@ def run_pipeline(
         stages.append(infer_patterns(settings))
         if report:
             stages.append(generate_report(settings, run_id=run_id))
+        if alert:
+            stages.append(generate_pipeline_alerts(settings))
         manifest.stages = [stage.to_dict() for stage in stages]
         manifest.finish("success")
         atomic_json(manifest_path, asdict(manifest))

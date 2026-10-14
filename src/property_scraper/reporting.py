@@ -107,17 +107,21 @@ def _round_for_report(frame: pd.DataFrame) -> pd.DataFrame:
         "itbi_m2_neighborhood_mean", "itbi_m2_neighborhood_pattern_mean",
         "itbi_m2_neighborhood_median", "itbi_m2_neighborhood_pattern_median",
         "listing_m2_neighborhood_mean", "listing_m2_neighborhood_pattern_mean",
-        "itbi_total_volume", "price_m2",
+        "itbi_total_volume", "price_m2", "carrying_cost_monthly", "carrying_cost_m2",
+        "estimated_monthly_rent", "price_drop",
     }
     area_columns = {"area_m2", "median_area", "area_min", "area_max"}
     ratio_columns = {
         "discount_vs_mean", "discount_vs_median", "classification_confidence",
         "discount_vs_neighborhood_mean", "discount_vs_neighborhood_pattern_mean",
+        "discount_vs_conservative_ref", "price_drop_pct", "estimated_gross_yield",
     }
     for column in result.columns.intersection(money_columns | area_columns):
         result[column] = pd.to_numeric(result[column], errors="coerce").round(2)
     for column in result.columns.intersection(ratio_columns):
         result[column] = pd.to_numeric(result[column], errors="coerce").round(4)
+    if "opportunity_score" in result.columns:
+        result["opportunity_score"] = pd.to_numeric(result["opportunity_score"], errors="coerce").round(1)
     return result
 
 
@@ -131,13 +135,14 @@ def _format_sheet(writer: pd.ExcelWriter, name: str, frame: pd.DataFrame) -> Non
     currency = workbook.add_format({"num_format": 'R$ #,##0.00'})
     price_m2 = workbook.add_format({"num_format": 'R$ #,##0.00"/m²"'})
     percent = workbook.add_format({"num_format": "0.0%"})
+    score_fmt = workbook.add_format({"num_format": "0.0", "bold": True, "align": "center"})
     for index, column in enumerate(frame.columns):
         worksheet.write(0, index, column, header)
         width = min(max(len(str(column)) + 2, 12), 38)
         if column == "title":
             width = 38
-        elif column in {"url", "source_file", "alternate_urls"}:
-            width = 28
+        elif column in {"url", "source_file", "alternate_urls", "score_breakdown"}:
+            width = 30
         elif column in {"latest_iptu_file", "latest_itbi_file", "sites", "neighborhoods"}:
             width = 38
         elif column in {"sha256", "source", "area_warning"}:
@@ -151,7 +156,8 @@ def _format_sheet(writer: pd.ExcelWriter, name: str, frame: pd.DataFrame) -> Non
             "itbi_m2_neighborhood_mean", "itbi_m2_neighborhood_pattern_mean",
             "itbi_m2_neighborhood_median", "itbi_m2_neighborhood_pattern_median",
             "listing_m2_neighborhood_mean", "listing_m2_neighborhood_pattern_mean",
-            "itbi_m2_p30", "itbi_m2_p80", "itbi_total_volume",
+            "itbi_m2_p30", "itbi_m2_p80", "itbi_total_volume", "carrying_cost_monthly",
+            "carrying_cost_m2", "estimated_monthly_rent", "price_drop",
         }:
             fmt = currency
         elif column == "price_m2":
@@ -159,8 +165,11 @@ def _format_sheet(writer: pd.ExcelWriter, name: str, frame: pd.DataFrame) -> Non
         elif column in {
             "discount_vs_mean", "discount_vs_median", "classification_confidence",
             "discount_vs_neighborhood_mean", "discount_vs_neighborhood_pattern_mean",
+            "discount_vs_conservative_ref", "price_drop_pct", "estimated_gross_yield",
         }:
             fmt = percent
+        elif column == "opportunity_score":
+            fmt = score_fmt
         worksheet.set_column(index, index, width, fmt)
     worksheet.freeze_panes(1, 0)
     worksheet.autofilter(0, 0, max(len(frame), 1), max(len(frame.columns) - 1, 0))

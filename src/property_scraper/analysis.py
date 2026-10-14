@@ -371,7 +371,30 @@ def deduplicate_physical_properties(
         else:
             rep["ranking_status"] = "parking_pending_review"
             rep["ranking_priority"] = 2
-            rep["parking_exclusion_reason"] = ""
+        rep["days_on_market"] = max([int(it.get("days_on_market", 0) or 0) for it in cluster] + [0])
+        rep["price_drop_pct"] = max([float(it.get("price_drop_pct", 0) or 0) for it in cluster] + [0.0])
+        rep["price_drop"] = max([float(it.get("price_drop", 0) or 0) for it in cluster] + [0.0])
+
+        # Re-evaluate opportunity score with cluster-updated discount, parking, and price drop
+        final_opp_status = rep.get("opportunity_status")
+        final_ranking_status = rep.get("ranking_status")
+        if final_opp_status in {"confirmed", "estimated"} and final_ranking_status in {"parking_eligible", "parking_pending_review"}:
+            discount_cons = float(rep.get("discount_vs_conservative_ref", 0) or 0)
+            score_discount = min(40.0, max(0.0, (discount_cons / 0.40) * 40.0))
+            ev = str(rep.get("evidence_level", ""))
+            score_evidence = 15.0 if ev == "confirmed" else (10.0 if ev == "likely" else 5.0)
+            score_parking = 15.0 if final_ranking_status == "parking_eligible" else 5.0
+            p_drop_pct = float(rep.get("price_drop_pct", 0) or 0)
+            score_price_drop = min(10.0, max(0.0, p_drop_pct * 100.0))
+            c_cost_m2 = float(rep.get("carrying_cost_m2", 0) or 0)
+            score_carrying_cost = 10.0 if (0 < c_cost_m2 <= 10.0) else (7.0 if (0 < c_cost_m2 <= 15.0) else (4.0 if c_cost_m2 > 15.0 else 6.0))
+            g_yield = float(rep.get("estimated_gross_yield", 0) or 0)
+            score_yield = min(10.0, max(0.0, (g_yield - 2.0) * 2.0))
+            rep["opportunity_score"] = round(score_discount + score_evidence + score_parking + score_price_drop + score_carrying_cost + score_yield, 1)
+            rep["score_breakdown"] = f"discount:{score_discount:.1f}|evidence:{score_evidence:.1f}|parking:{score_parking:.1f}|price_drop:{score_price_drop:.1f}|carrying_cost:{score_carrying_cost:.1f}|yield:{score_yield:.1f}"
+        else:
+            rep["opportunity_score"] = 0.0
+            rep["score_breakdown"] = "not_qualified"
 
         output_rows.append(rep)
 
@@ -480,10 +503,16 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         pattern_arbitrage = (
             pattern == "P5" and p3_median > 0 and float(listing["price_m2"]) <= p3_median * rules.pattern_arbitrage_multiplier
         )
-        if pattern_mean_m2 > 0 and mean_m2 > 0:
+        pattern_confidence_low = False
+        if evidence == "estimated":
+            min_confidence = getattr(rules, "pattern_min_confidence", 0.50)
+            if confidence < min_confidence:
+                pattern_confidence_low = True
+
+        if pattern_mean_m2 > 0 and mean_m2 > 0 and not pattern_confidence_low:
             conservative_ref_m2 = min(pattern_mean_m2, mean_m2)
         else:
-            conservative_ref_m2 = pattern_mean_m2 or mean_m2
+            conservative_ref_m2 = mean_m2 if pattern_confidence_low else (pattern_mean_m2 or mean_m2)
 
         discount_conservative = (
             (conservative_ref_m2 - float(listing["price_m2"])) / conservative_ref_m2
@@ -501,6 +530,8 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             criteria.append("neighborhood_pattern_discount")
         if pattern_arbitrage:
             criteria.append("finish_pattern_arbitrage")
+        if pattern_confidence_low:
+            criteria.append("pattern_confidence_fallback")
 
         has_unverified_area = area_warning in DOUBTFUL_AREA_WARNINGS | {"area_unverified"}
         if qualifies and not has_unverified_area:
@@ -534,6 +565,32 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         else:
             ranking_status = "parking_pending_review"
             ranking_priority = 2
+
+        # Carrying cost and rental yield metrics (§4.4)
+        condo_val = float(listing.get("condominium", 0) or 0)
+        iptu_val = float(listing.get("advertised_iptu", 0) or 0)
+        carrying_cost_monthly = condo_val + (iptu_val / 12.0)
+        carrying_cost_m2 = (carrying_cost_monthly / area_val) if area_val > 0 else 0.0
+
+        price_val = float(listing.get("price", 0) or 0)
+        estimated_monthly_rent = area_val * mean_m2 * 0.0045 if (mean_m2 > 0 and area_val > 0) else 0.0
+        estimated_gross_yield = (estimated_monthly_rent * 12.0 / price_val * 100.0) if price_val > 0 else 0.0
+
+        # Composite Opportunity Score (§4.4)
+        if opportunity_status in {"confirmed", "estimated"} and ranking_status in {"parking_eligible", "parking_pending_review"}:
+            score_discount = min(40.0, max(0.0, (discount_conservative / 0.40) * 40.0))
+            score_evidence = 15.0 if evidence == "confirmed" else (10.0 if evidence == "likely" else 5.0)
+            score_parking = 15.0 if ranking_status == "parking_eligible" else 5.0
+            price_drop_pct = float(listing.get("price_drop_pct", 0) or 0)
+            score_price_drop = min(10.0, max(0.0, price_drop_pct * 100.0))
+            score_carrying_cost = 10.0 if (0 < carrying_cost_m2 <= 10.0) else (7.0 if (0 < carrying_cost_m2 <= 15.0) else (4.0 if carrying_cost_m2 > 15.0 else 6.0))
+            score_yield = min(10.0, max(0.0, (estimated_gross_yield - 2.0) * 2.0))
+            opportunity_score = round(score_discount + score_evidence + score_parking + score_price_drop + score_carrying_cost + score_yield, 1)
+            score_breakdown = f"discount:{score_discount:.1f}|evidence:{score_evidence:.1f}|parking:{score_parking:.1f}|price_drop:{score_price_drop:.1f}|carrying_cost:{score_carrying_cost:.1f}|yield:{score_yield:.1f}"
+        else:
+            opportunity_score = 0.0
+            score_breakdown = "not_qualified"
+
         record = listing.to_dict()
         record.update({
             "cep_original": original_cep,
@@ -545,6 +602,7 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             "classification_method": method,
             "classification_confidence": confidence,
             "classifier_version": classifier.version,
+            "pattern_confidence_low": pattern_confidence_low,
             "itbi_m2_neighborhood_mean": mean_m2,
             "itbi_m2_neighborhood_pattern_mean": pattern_mean_m2,
             "itbi_m2_neighborhood_median": median_m2,
@@ -556,6 +614,12 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
             "discount_vs_conservative_ref": discount_conservative,
             "discount_vs_mean": discount_mean,
             "discount_vs_median": discount_median,
+            "carrying_cost_monthly": carrying_cost_monthly,
+            "carrying_cost_m2": carrying_cost_m2,
+            "estimated_monthly_rent": estimated_monthly_rent,
+            "estimated_gross_yield": estimated_gross_yield,
+            "opportunity_score": opportunity_score,
+            "score_breakdown": score_breakdown,
             "opportunity_criteria": ",".join(criteria),
             "opportunity_status": opportunity_status,
             "ranking_status": ranking_status,
@@ -597,10 +661,17 @@ def analyze(settings: Settings, classifier_mode: str | None = None, discount_thr
         "parking_review_status", "condominium", "advertised_iptu", "street", "number",
         "finish_pattern", "building_year",
     ]
-    remaining_columns = [column for column in analysis.columns if column not in leading_columns + metric_columns]
-    analysis = analysis[leading_columns + metric_columns + remaining_columns]
+    p3_feature_columns = [
+        "opportunity_score", "score_breakdown", "days_on_market", "listing_id",
+        "price_drop", "price_drop_pct", "carrying_cost_monthly", "carrying_cost_m2",
+        "estimated_monthly_rent", "estimated_gross_yield", "pattern_confidence_low",
+    ]
+    existing_p3 = [col for col in p3_feature_columns if col in analysis.columns]
+    consumed = set(leading_columns + metric_columns + existing_p3)
+    remaining_columns = [column for column in analysis.columns if column not in consumed]
+    analysis = analysis[leading_columns + metric_columns + existing_p3 + remaining_columns]
     analysis.sort_values(
-        by=["ranking_priority", "discount_vs_conservative_ref"], ascending=[False, False], inplace=True
+        by=["ranking_priority", "opportunity_score", "discount_vs_conservative_ref"], ascending=[False, False, False], inplace=True
     )
     path, manifest = write_dataset(
         analysis,

@@ -58,6 +58,9 @@ class RulesSettings:
     dedup_price_tolerance: float = 0.08
     dedup_strict_tolerance: float = 0.03
     pattern_arbitrage_multiplier: float = 1.15
+    pattern_min_confidence: float = 0.50
+    pattern_min_samples_leaf: int = 5
+    min_price_drop_pct: float = 0.03
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,9 @@ def load_settings(config_path: str | Path = "config.json") -> Settings:
         dedup_price_tolerance=float(rules_raw.get("dedup_price_tolerance", 0.08)),
         dedup_strict_tolerance=float(rules_raw.get("dedup_strict_tolerance", 0.03)),
         pattern_arbitrage_multiplier=float(rules_raw.get("pattern_arbitrage_multiplier", 1.15)),
+        pattern_min_confidence=float(rules_raw.get("pattern_min_confidence", 0.50)),
+        pattern_min_samples_leaf=int(rules_raw.get("pattern_min_samples_leaf", 5)),
+        min_price_drop_pct=float(rules_raw.get("min_price_drop_pct", 0.03)),
     )
     settings = Settings(
         paths=Paths.from_root(root),
